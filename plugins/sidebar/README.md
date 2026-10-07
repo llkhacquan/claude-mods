@@ -3,7 +3,7 @@
 A side pane that shows every live Claude Code session on this machine as a card. No tmux, no daemon, no extra binary: each session writes its own card to a small file, and each pane reads all the cards.
 
 ```
-╭ api ─────────────────────────── running ╮
+╭ api ───────────────────────── ✦ running ╮
 │ 1: Fix login redirect loop               │
 │ ⚡ Bash: go test ./auth/...              │
 │ 🌿 fix/login                             │
@@ -40,7 +40,7 @@ Each card shows:
 
 | Line | What |
 |------|------|
-| Top border | The folder, and the status: `running`, `needs input`, `asked you` (it ended its turn with a question), `idle` |
+| Top border | The folder, and the status: `running`, `needs input`, `asked you` (it ended its turn with a question), `idle`. A running card has a spinner beside the word; it turns only while the pane is open |
 | Title | A 3-6 word label of what the session is working on |
 | Tool | `⚡` and the current tool while it runs, `▲` and the tool that waits for you |
 | Branch | `🌿` and the git branch |

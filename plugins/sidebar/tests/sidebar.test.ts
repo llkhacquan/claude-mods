@@ -1,12 +1,13 @@
 import { expect, mock, test, type Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { cellWidth, debugFile, feedDir, fit, jumpKeys, lineText, modelName, renderCards, statusLook, toCard, usageLine, visibleCards, wrapWords } from '../hooks/register.tsx'
+import { SPINNER, cellWidth, debugFile, feedDir, fit, jumpKeys, lineText, modelName, renderCards, statusLook, toCard, usageLine, visibleCards, wrapWords } from '../hooks/register.tsx'
 import type { Card } from '../types'
 
 const SID = 'sess-1'
 const DIR = '/state/feed'
 const NOW = 1000000
 const POLL_MS = 2000
+const SPIN_MS = 150
 
 const PANE = {
   plugin: 'sidebar',
@@ -109,8 +110,8 @@ async function paneText($: Engine): Promise<string> {
   return texts.join('')
 }
 
-function drawn(list: Card[], width: number, ownId = ''): string[] {
-  return renderCards(list, width, ownId).map(lineText)
+function drawn(list: Card[], width: number, ownId = '', spin = 0): string[] {
+  return renderCards(list, width, ownId, spin).map(lineText)
 }
 
 test('a session publishes its card with no tmux, and a turn moves it from idle to running and back', async ($, on) => {
@@ -216,7 +217,7 @@ test('closing the pane keeps it closed in the next session', async ($, on) => {
 test('a card draws its folder and status in the top border, at the pane width', () => {
   const lines = drawn([card({ sessionId: 'a', status: 'running', tool: 'Bash: go test ./...', recap: ['Needs: pick the changelog format before the release goes out today', 'Did: x'] })], 40, 'me')
   expect(lines).toEqual([
-    '╭ api ──────────────────────── running ╮',
+    '╭ api ────────────────────── ✦ running ╮',
     '│ 1: Fix login bug                     │',
     '│ ⚡ Bash: go test ./...               │',
     '│ 🌿 main                              │',
@@ -226,6 +227,44 @@ test('a card draws its folder and status in the top border, at the pane width', 
     '╰──────────────────────────────────────╯',
   ])
   expect(lines.map(cellWidth)).toEqual(lines.map(() => 40))
+})
+
+test('a running card steps its spinner with the frame and keeps its width', () => {
+  const tops = SPINNER.map((_, spin) => drawn([card({ sessionId: 'a', status: 'running' })], 40, 'me', spin)[0] ?? '')
+  expect(SPINNER.map(cellWidth)).toEqual(SPINNER.map(() => 1))
+  expect(new Set(tops).size).toBe(SPINNER.length)
+  expect(tops.map(cellWidth)).toEqual(tops.map(() => 40))
+  expect(drawn([card({ sessionId: 'a', status: 'running' })], 40, 'me', SPINNER.length)[0]).toBe(tops[0])
+  expect(drawn([card({ sessionId: 'a' })], 40, 'me', 0)).toEqual(drawn([card({ sessionId: 'a' })], 40, 'me', 3))
+})
+
+test('the spinner turns while the pane is open and a card runs, and stops otherwise', async ($, on) => {
+  const { clock, others } = harness(on)
+  await start($)
+  others(card({ sessionId: 'a', status: 'running' }))
+  await clock.advance(POLL_MS)
+  const closed = await paneText($)
+  await clock.advance(SPIN_MS * 3)
+  expect(await paneText($)).toBe(closed)
+
+  await $.command.run(RUN)
+  const first = await paneText($)
+  await clock.advance(SPIN_MS)
+  const second = await paneText($)
+  expect(second).not.toBe(first)
+
+  others(card({ sessionId: 'a', status: 'idle' }))
+  await clock.advance(POLL_MS)
+  const idle = await paneText($)
+  await clock.advance(SPIN_MS * 3)
+  expect(await paneText($)).toBe(idle)
+
+  others(card({ sessionId: 'a', status: 'running' }))
+  await clock.advance(POLL_MS)
+  await $.command.run(RUN)
+  const shut = await paneText($)
+  await clock.advance(SPIN_MS * 3)
+  expect(await paneText($)).toBe(shut)
 })
 
 test('the own card has a double border and no hotkey, and an empty title reads Ready', () => {

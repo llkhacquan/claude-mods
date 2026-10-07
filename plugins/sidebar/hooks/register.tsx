@@ -12,6 +12,7 @@ const CONTEXT_WARN = 50
 const CONTEXT_FULL = 80
 const HEARTBEAT_MS = 30000
 const POLL_MS = 2000
+const SPIN_MS = 150
 const STALE_MS = 90000
 const JUMP_KEYS = 9
 const GIT_TIMEOUT_MS = 3000
@@ -28,6 +29,7 @@ const RECAP_LINE_MAX = 200
 const RECAP_LABELS = ['Needs', 'Did', 'Left']
 const NEEDS_PREFIX = 'Needs: '
 const FILE_TOOLS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit']
+export const SPINNER = ['✦', '✧', '✶', '✷', '✸', '✹', '✺', '✻']
 const STATUSES: Status[] = ['idle', 'running', 'needs-input', 'ended']
 const REPLY_START = /^(i\s|i['’]|(sorry|unfortunately|sure|certainly|here['’]?s|as an ai)\b)/i
 
@@ -94,6 +96,8 @@ let writing: Promise<void> = Promise.resolve()
 let seen = new Map<string, { mtimeMs: number; card: Card }>()
 let shown = ''
 let timers: Timer[] = []
+let spinner: Timer | null = null
+let isAnyRunning = false
 let titleSeq = 0
 let recapSeq = 0
 let turnTools = 0
@@ -105,6 +109,7 @@ let isDebug = false
 let paneWidth = PANE_COLUMNS
 
 const cards = atom({ plugin: 'sidebar', key: 'cards' } as const, [])
+const frame = atom({ plugin: 'sidebar', key: 'frame' } as const, 0)
 
 export function feedDir(stateDir: string | undefined, xdgState: string | undefined, home: string | undefined): string {
   if (stateDir) return `${stateDir}/feed`
@@ -224,7 +229,7 @@ export function usageLine(card: Card): string {
   return [dot + fill, modelName(card.model), cost].filter(p => p !== '').join(' · ')
 }
 
-function cardLines(card: Card, width: number, isOwn: boolean, hotkey: string | undefined): Line[] {
+function cardLines(card: Card, width: number, isOwn: boolean, hotkey: string | undefined, spin: number): Line[] {
   const look = statusLook(card)
   const color: ThemeKey = isOwn ? 'suggestion' : look.color
   const border = isOwn ? DOUBLE : ROUND
@@ -234,7 +239,7 @@ function cardLines(card: Card, width: number, isOwn: boolean, hotkey: string | u
     const pad = ' '.repeat(Math.max(0, inner - cellWidth(span.text)))
     return line([{ text: `${border.wall} `, color }, span, { text: `${pad} ${border.wall}`, color }])
   }
-  const word = ` ${look.word} `
+  const word = card.status === 'running' ? ` ${SPINNER[spin % SPINNER.length]} ${look.word} ` : ` ${look.word} `
   const mark = isOwn ? '▶ ' : ''
   const name = ` ${mark}${fit(folderName(card.cwd) || card.sessionId, width - 5 - cellWidth(mark) - cellWidth(word))} `
   const flat = border.flat.repeat(Math.max(0, width - 2 - cellWidth(name) - cellWidth(word)))
@@ -259,9 +264,9 @@ function cardLines(card: Card, width: number, isOwn: boolean, hotkey: string | u
   ]
 }
 
-export function renderCards(list: Card[], width: number, ownId: string): Line[] {
+export function renderCards(list: Card[], width: number, ownId: string, spin = 0): Line[] {
   const hotkeys = jumpKeys(list, ownId)
-  return list.flatMap(card => cardLines(card, width, card.sessionId === ownId, hotkeys.get(card.sessionId)))
+  return list.flatMap(card => cardLines(card, width, card.sessionId === ownId, hotkeys.get(card.sessionId), spin))
 }
 
 export function lineText(line: Line): string {
@@ -395,6 +400,16 @@ async function publish($: EngineInterface, patch: Partial<Card>): Promise<void> 
   await writing
 }
 
+async function syncSpinner($: EngineInterface): Promise<void> {
+  const isPlaced = (await $.ui.panes()).some(p => p.id === PANE && p.isPlaced)
+  if (isPlaced && isAnyRunning) {
+    spinner ??= $.clock.every(SPIN_MS, () => void update($, frame, n => (n ?? 0) + 1))
+    return
+  }
+  spinner?.cancel()
+  spinner = null
+}
+
 async function refresh($: EngineInterface): Promise<void> {
   if (!dir || !(await $.fs.exists(dir))) return
   const next = new Map<string, { mtimeMs: number; card: Card }>()
@@ -413,7 +428,9 @@ async function refresh($: EngineInterface): Promise<void> {
   const key = JSON.stringify(list)
   if (key === shown) return
   shown = key
+  isAnyRunning = list.some(c => c.status === 'running')
   await update($, cards, () => list)
+  await syncSpinner($)
   if (isDebug) await $.fs.write(debugFile(dir), renderCards(list, paneWidth, own.sessionId).map(lineText).join('\n') + '\n')
 }
 
@@ -461,6 +478,8 @@ export const register: Register = on => {
       title: sessionId === own.sessionId ? own.title : await savedTitle($, sessionId),
     })
     for (const timer of timers) timer.cancel()
+    spinner?.cancel()
+    spinner = null
     timers = [
       $.clock.every(HEARTBEAT_MS, () => void publish($, {})),
       $.clock.every(POLL_MS, () => {
@@ -472,6 +491,7 @@ export const register: Register = on => {
     if ((await $.store.get(OPEN_KEY)) === true) {
       await refresh($)
       await $.ui.open({ id: PANE, title: PANE_TITLE, columns: PANE_COLUMNS })
+      await syncSpinner($)
     }
     return r
   })
@@ -479,17 +499,20 @@ export const register: Register = on => {
   on('command.run', { command: 'sidebar' }, async $ => {
     if ((await $.ui.panes()).some(p => p.id === PANE && p.isPlaced)) {
       await $.ui.close({ id: PANE })
+      await syncSpinner($)
       return { text: 'Sidebar closed.' }
     }
     await $.store.set(OPEN_KEY, true)
     await refresh($)
     await $.ui.open({ id: PANE, title: PANE_TITLE, focus: true, columns: PANE_COLUMNS })
+    await syncSpinner($)
     return { text: 'Sidebar opened.' }
   })
 
   on('ui.close', async ($, e, next) => {
     const r = await next(e)
     if (e.id === PANE && e.origin.kind !== 'unload') await $.store.set(OPEN_KEY, false)
+    if (e.id === PANE) await syncSpinner($)
     return r
   })
 
@@ -609,13 +632,14 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const list = await read($, cards)
+    const spin = await read($, frame)
     const width = e.props.bodyColumns
     paneWidth = width
     if (list.length === 0) return <Text dimColor>No live sessions.</Text>
     const byId = new Map(list.map(card => [card.sessionId, card]))
     return (
       <Box flexDirection="column" width={width}>
-        {renderCards(list, width, own.sessionId).map(line => (
+        {renderCards(list, width, own.sessionId, spin).map(line => (
           <Box flexDirection="row" width={width}>
             {line.spans.map(span => {
               const card = byId.get(line.sessionId)

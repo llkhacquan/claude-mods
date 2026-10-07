@@ -20,6 +20,6 @@ export type Card = {
 
 declare module 'claude-code' {
   interface PluginState {
-    sidebar: { cards: Card[] }
+    sidebar: { cards: Card[]; frame: number }
   }
 }
