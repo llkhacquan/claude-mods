@@ -1,6 +1,6 @@
 import { expect, mock, test, type Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { feedDir, jumpKeys, metaLine, statusLook, toCard, visibleCards } from '../hooks/register.tsx'
+import { cellWidth, debugFile, feedDir, fit, jumpKeys, lineText, modelName, renderCards, statusLook, toCard, usageLine, visibleCards, wrapWords } from '../hooks/register.tsx'
 import type { Card } from '../types'
 
 const SID = 'sess-1'
@@ -16,6 +16,8 @@ const PANE = {
   props: { title: 'Sessions', isFocused: true, bodyColumns: 40, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
 } as const
 
+const RUN = { command: 'sidebar', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } } as const
+
 function card(patch: Partial<Card>): Card {
   return {
     sessionId: 'other',
@@ -27,6 +29,9 @@ function card(patch: Partial<Card>): Card {
     tool: '',
     model: 'claude-opus-5-5',
     contextPercent: 41.6,
+    contextTokens: 416000,
+    contextWindow: 1000000,
+    costUsd: 2.2,
     title: 'Fix login bug',
     recap: [],
     updatedAt: NOW,
@@ -34,8 +39,20 @@ function card(patch: Partial<Card>): Card {
   }
 }
 
-function harness(on: On, env: Record<string, string> = {}) {
+function harness(on: On, env: Record<string, string> = {}, stored: Record<string, unknown> = {}) {
   const clock = mock.clock(on, { now: NOW })
+  mock.store(on, stored)
+  const opened: { id: string; focus?: boolean }[] = []
+  on('ui.open', ($, e) => {
+    opened.push({ id: e.id, focus: e.focus })
+    return { value: { isPlaced: true } }
+  })
+  on('ui.panes', () => ({ value: opened.map(p => ({ id: p.id, title: 'Sessions', isShown: true, isFocused: false, isPlaced: true })) }))
+  on('ui.close', ($, e) => {
+    opened.splice(0, opened.length, ...opened.filter(p => p.id !== e.id))
+    return { value: undefined }
+  })
+  on('session.model', () => ({ value: 'claude-opus-5-5' }))
   mock.env(on, { CLAUDE_SIDEBAR_STATE_DIR: '/state', HOME: '/home/q', ...env })
   const files = new Map<string, string>()
   const mtimes = new Map<string, number>()
@@ -78,18 +95,22 @@ function harness(on: On, env: Record<string, string> = {}) {
     for (const c of list) put(`${DIR}/${c.sessionId}.json`, JSON.stringify(c))
   }
   const tmuxCalls = () => ran.filter(argv => argv[0] === 'tmux')
-  return { clock, files, own, others, tmuxCalls, toasts }
+  return { clock, files, own, others, tmuxCalls, toasts, opened }
 }
 
 async function start($: Engine) {
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/web' })
 }
 
-async function paneTexts($: Engine): Promise<string[]> {
+async function paneText($: Engine): Promise<string> {
   const pane = await $.ui.mount(PANE)
   const texts = (await pane.findAll({ type: 'Text' })).map(t => t.text)
   await pane.unmount()
-  return texts
+  return texts.join('')
+}
+
+function drawn(list: Card[], width: number, ownId = ''): string[] {
+  return renderCards(list, width, ownId).map(lineText)
 }
 
 test('a session publishes its card with no tmux, and a turn moves it from idle to running and back', async ($, on) => {
@@ -136,12 +157,13 @@ test('the pane lists live sessions and hides ended and stale ones', async ($, on
   )
   await clock.advance(POLL_MS)
 
-  const texts = await paneTexts($)
-  expect(texts).toContain('● Edit: /work/api/a.go')
-  expect(texts).toContain('api · main · opus-5-5 · 42%')
-  expect(texts).toContain('Did: moved the reaper')
-  expect(texts.join('\n')).not.toContain('Ended one')
-  expect(texts.join('\n')).not.toContain('Crashed one')
+  const text = await paneText($)
+  expect(text).toContain('⚡ Edit: /work/api/a.go')
+  expect(text).toContain('🟢 416k/1M · Opus 5.5 · $2.20')
+  expect(text).toContain('🌿 main')
+  expect(text).not.toContain('Did: moved the reaper')
+  expect(text).not.toContain('Ended one')
+  expect(text).not.toContain('Crashed one')
 })
 
 test('a card that stops its heartbeat drops out of the pane', async ($, on) => {
@@ -150,10 +172,79 @@ test('a card that stops its heartbeat drops out of the pane', async ($, on) => {
   await start($)
   others(card({ sessionId: 'live', status: 'needs-input' }))
   await clock.advance(POLL_MS)
-  expect(await paneTexts($)).toContain('▲ needs input')
+  expect(await paneText($)).toContain('needs input')
 
   await clock.advance(90000)
-  expect(await paneTexts($)).not.toContain('▲ needs input')
+  expect(await paneText($)).not.toContain('needs input')
+})
+
+test('debug mode keeps stale cards and dumps the drawn pane to a file', async ($, on) => {
+  const { others, clock, files } = harness(on, { CLAUDE_SIDEBAR_DEBUG: '1' })
+
+  await start($)
+  others(card({ sessionId: 'old', title: 'Old fixture', updatedAt: NOW - 200000 }))
+  await clock.advance(POLL_MS)
+
+  const dump = files.get('/state/debug/pane.txt') ?? ''
+  expect(dump).toContain('Old fixture')
+  expect(dump.split('\n')[0]).toBe('╭ api ─────────────────────────────── idle ╮')
+})
+
+test('/sidebar opens the pane and a new session opens it again', async ($, on) => {
+  const { opened } = harness(on)
+
+  await start($)
+  expect(opened).toEqual([])
+  expect(await $.command.run(RUN)).toMatchObject({ text: 'Sidebar opened.' })
+  expect(opened).toEqual([{ id: 'sidebar', focus: true }])
+
+  await start($)
+  expect(opened.at(-1)).toEqual({ id: 'sidebar', focus: undefined })
+})
+
+test('closing the pane keeps it closed in the next session', async ($, on) => {
+  const { opened } = harness(on, {}, { open: true })
+
+  await start($)
+  expect(opened.length).toBe(1)
+  expect(await $.command.run(RUN)).toMatchObject({ text: 'Sidebar closed.' })
+
+  await start($)
+  expect(opened).toEqual([])
+})
+
+test('a card draws its folder and status in the top border, at the pane width', () => {
+  const lines = drawn([card({ sessionId: 'a', status: 'running', tool: 'Bash: go test ./...', recap: ['Needs: pick the changelog format before the release goes out today', 'Did: x'] })], 40, 'me')
+  expect(lines).toEqual([
+    '╭ api ──────────────────────── running ╮',
+    '│ 1: Fix login bug                     │',
+    '│ ⚡ Bash: go test ./...               │',
+    '│ 🌿 main                              │',
+    '│ 🟢 416k/1M · Opus 5.5 · $2.20        │',
+    '│ Needs: pick the changelog format     │',
+    '│ before the release goes out today    │',
+    '╰──────────────────────────────────────╯',
+  ])
+  expect(lines.map(cellWidth)).toEqual(lines.map(() => 40))
+})
+
+test('the own card has a double border and no hotkey, and an empty title reads Ready', () => {
+  const lines = drawn([card({ sessionId: 'me', title: '', branch: '', model: '', contextPercent: null, contextTokens: null, costUsd: null })], 30, 'me')
+  expect(lines).toEqual(['╔ ▶ api ═══════════════ idle ╗', '║ Ready                      ║', '╚════════════════════════════╝'])
+})
+
+test('long text is cut to the cell width, wide glyphs count as two', () => {
+  expect(fit('abcdef', 4)).toBe('abc…')
+  expect(fit('🌿🌿🌿', 4)).toBe('🌿…')
+  expect(cellWidth('⚡ a')).toBe(4)
+  expect(wrapWords('one two three four five', 9, 2)).toEqual(['one two', 'three fo…'])
+})
+
+test('the model reads as a name and a version', () => {
+  expect(modelName('claude-opus-5-5')).toBe('Opus 5.5')
+  expect(modelName('claude-sonnet-4-5-20250929')).toBe('Sonnet 4.5')
+  expect(modelName('claude-opus-5-5[1m]')).toBe('Opus 5.5')
+  expect(modelName('')).toBe('')
 })
 
 test('a hotkey jumps through tmux when both sessions are in tmux', async ($, on) => {
@@ -215,14 +306,20 @@ test('a feed file with a wrong shape is not a card', () => {
 })
 
 test('the status line reads the state a person cares about first', () => {
-  expect(statusLook(card({ status: 'needs-input' })).label).toBe('needs input')
-  expect(statusLook(card({ status: 'running' })).label).toBe('running')
-  expect(statusLook(card({ asked: true })).label).toBe('asked you')
-  expect(statusLook(card({})).label).toBe('idle')
+  expect(statusLook(card({ status: 'needs-input' })).word).toBe('needs input')
+  expect(statusLook(card({ status: 'running' })).word).toBe('running')
+  expect(statusLook(card({ asked: true })).word).toBe('asked you')
+  expect(statusLook(card({})).word).toBe('idle')
 })
 
-test('the meta line skips what a card does not know', () => {
-  expect(metaLine(card({ branch: '', contextPercent: null }))).toBe('api · opus-5-5')
+test('the usage line skips what a card does not know', () => {
+  expect(usageLine(card({ contextPercent: null, contextTokens: null, costUsd: null }))).toBe('Opus 5.5')
+  expect(usageLine(card({ contextPercent: 85, contextTokens: null, model: '', costUsd: 0 }))).toBe('🔴 85%')
+  expect(usageLine(card({ contextPercent: 60, contextTokens: 120000, contextWindow: 200000 }))).toBe('🟡 120k/200k · Opus 5.5 · $2.20')
+})
+
+test('the debug dump sits beside the feed folder', () => {
+  expect(debugFile('/s/feed')).toBe('/s/debug/pane.txt')
 })
 
 test('the feed directory follows the override, then XDG, then HOME', () => {

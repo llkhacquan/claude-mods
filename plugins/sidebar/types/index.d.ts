@@ -10,6 +10,9 @@ export type Card = {
   tool: string
   model: string
   contextPercent: number | null
+  contextTokens: number | null
+  contextWindow: number | null
+  costUsd: number | null
   title: string
   recap: string[]
   updatedAt: number

@@ -1,10 +1,15 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, Timer } from 'claude-code'
+import type { EngineInterface, Register, ThemeKey, Timer } from 'claude-code'
 
 import type { Card, Status } from '../types'
 
 const PANE = 'sidebar'
 const PANE_COLUMNS = 44
+const PANE_TITLE = 'Sessions'
+const OPEN_KEY = 'open'
+const NEEDS_LINES_MAX = 2
+const CONTEXT_WARN = 50
+const CONTEXT_FULL = 80
 const HEARTBEAT_MS = 30000
 const POLL_MS = 2000
 const STALE_MS = 90000
@@ -21,6 +26,7 @@ const RECAP_TAIL = 4000
 const RECAP_REQUEST_MAX = 500
 const RECAP_LINE_MAX = 200
 const RECAP_LABELS = ['Needs', 'Did', 'Left']
+const NEEDS_PREFIX = 'Needs: '
 const FILE_TOOLS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit']
 const STATUSES: Status[] = ['idle', 'running', 'needs-input', 'ended']
 const REPLY_START = /^(i\s|i['’]|(sorry|unfortunately|sure|certainly|here['’]?s|as an ai)\b)/i
@@ -49,7 +55,18 @@ const POLITE = ['let me know if', 'let me know when', 'feel free to', "if you'd 
 
 const STARTERS = ['which ', 'what ', 'how ', 'should i ', 'do you ', 'want me to ', 'shall i ', 'would you ', 'can you ', 'could you ', 'are you ']
 
-type Look = { glyph: string; label: string; color: string }
+const ZERO_WIDTH = /[\u0300-\u036F\u200B-\u200D\uFE0E\uFE0F]/u
+const WIDE =
+  /[\u1100-\u115F\u231A\u231B\u23E9-\u23EC\u23F0\u23F3\u25FD\u25FE\u2614\u2615\u2648-\u2653\u267F\u2693\u26A1\u26AA\u26AB\u26BD\u26BE\u26C4\u26C5\u26CE\u26D4\u26EA\u26F2\u26F3\u26F5\u26FA\u26FD\u2705\u270A\u270B\u2728\u274C\u274E\u2753-\u2755\u2757\u2795-\u2797\u27B0\u27BF\u2B1B\u2B1C\u2B50\u2B55\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6\u{1F300}-\u{1FAFF}\u{20000}-\u{3FFFD}]/u
+
+type Look = { word: string; glyph: string; color: ThemeKey }
+type Border = { topLeft: string; topRight: string; bottomLeft: string; bottomRight: string; flat: string; wall: string }
+
+export type Span = { text: string; color?: ThemeKey; isBold?: boolean; isDim?: boolean; hotkey?: string }
+export type Line = { sessionId: string; spans: Span[] }
+
+const ROUND: Border = { topLeft: '╭', topRight: '╮', bottomLeft: '╰', bottomRight: '╯', flat: '─', wall: '│' }
+const DOUBLE: Border = { topLeft: '╔', topRight: '╗', bottomLeft: '╚', bottomRight: '╝', flat: '═', wall: '║' }
 
 function freshCard(paneId: string, cwd: string, branch: string): Card {
   return {
@@ -62,6 +79,9 @@ function freshCard(paneId: string, cwd: string, branch: string): Card {
     tool: '',
     model: '',
     contextPercent: null,
+    contextTokens: null,
+    contextWindow: null,
+    costUsd: null,
     title: '',
     recap: [],
     updatedAt: 0,
@@ -81,6 +101,8 @@ let turnFiles = new Set<string>()
 let lastRequest = ''
 let callsInFlight = 0
 let isInteractive = true
+let isDebug = false
+let paneWidth = PANE_COLUMNS
 
 const cards = atom({ plugin: 'sidebar', key: 'cards' } as const, [])
 
@@ -90,10 +112,15 @@ export function feedDir(stateDir: string | undefined, xdgState: string | undefin
   return `${home ?? ''}/.local/state/claude-sidebar/feed`
 }
 
+export function debugFile(feed: string): string {
+  return feed.replace(/feed$/, 'debug/pane.txt')
+}
+
 export function toCard(raw: unknown): Card | null {
   if (!raw || typeof raw !== 'object') return null
   const r = raw as Record<string, unknown>
   const text = (key: string) => (typeof r[key] === 'string' ? (r[key] as string) : '')
+  const count = (key: string) => (typeof r[key] === 'number' ? (r[key] as number) : null)
   const status = STATUSES.find(s => s === r['status'])
   if (text('sessionId') === '' || typeof r['updatedAt'] !== 'number' || !status) return null
   return {
@@ -105,16 +132,19 @@ export function toCard(raw: unknown): Card | null {
     asked: r['asked'] === true,
     tool: text('tool'),
     model: text('model'),
-    contextPercent: typeof r['contextPercent'] === 'number' ? r['contextPercent'] : null,
+    contextPercent: count('contextPercent'),
+    contextTokens: count('contextTokens'),
+    contextWindow: count('contextWindow'),
+    costUsd: count('costUsd'),
     title: text('title'),
     recap: Array.isArray(r['recap']) ? r['recap'].filter((l): l is string => typeof l === 'string') : [],
     updatedAt: r['updatedAt'],
   }
 }
 
-export function visibleCards(all: Card[], now: number): Card[] {
+export function visibleCards(all: Card[], now: number, keepStale = false): Card[] {
   return all
-    .filter(c => c.status !== 'ended' && now - c.updatedAt < STALE_MS)
+    .filter(c => c.status !== 'ended' && (keepStale || now - c.updatedAt < STALE_MS))
     .sort((a, b) => a.cwd.localeCompare(b.cwd) || a.sessionId.localeCompare(b.sessionId))
 }
 
@@ -128,16 +158,114 @@ export function jumpKeys(list: Card[], ownId: string): Map<string, string> {
 }
 
 export function statusLook(card: Card): Look {
-  if (card.status === 'needs-input') return { glyph: '▲', label: 'needs input', color: 'warning' }
-  if (card.status === 'running') return { glyph: '●', label: card.tool || 'running', color: 'success' }
-  if (card.asked) return { glyph: '?', label: 'asked you', color: 'warning' }
-  return { glyph: '○', label: 'idle', color: 'subtle' }
+  if (card.status === 'needs-input') return { word: 'needs input', glyph: '▲', color: 'warning' }
+  if (card.status === 'running') return { word: 'running', glyph: '⚡', color: 'success' }
+  if (card.asked) return { word: 'asked you', glyph: '?', color: 'warning' }
+  return { word: 'idle', glyph: '○', color: 'subtle' }
 }
 
-export function metaLine(card: Card): string {
-  const repo = card.cwd.split('/').filter(p => p !== '').pop() ?? ''
-  const context = card.contextPercent === null ? '' : `${Math.round(card.contextPercent)}%`
-  return [repo, card.branch, card.model.replace(/^claude-/, ''), context].filter(p => p !== '').join(' · ')
+export function cellWidth(text: string): number {
+  let cells = 0
+  for (const ch of text) cells += ZERO_WIDTH.test(ch) ? 0 : WIDE.test(ch) ? 2 : 1
+  return cells
+}
+
+export function fit(text: string, width: number): string {
+  if (width <= 0) return ''
+  if (cellWidth(text) <= width) return text
+  let out = ''
+  let used = 0
+  for (const ch of text) {
+    const cells = cellWidth(ch)
+    if (used + cells > width - 1) break
+    out += ch
+    used += cells
+  }
+  return out + '…'
+}
+
+export function wrapWords(text: string, width: number, maxLines: number): string[] {
+  const lines: string[] = []
+  let line = ''
+  for (const word of text.split(/\s+/).filter(w => w !== '')) {
+    const longer = line === '' ? word : `${line} ${word}`
+    if (cellWidth(longer) <= width) {
+      line = longer
+      continue
+    }
+    if (lines.length === maxLines - 1) return [...lines, fit(longer, width)]
+    if (line !== '') lines.push(fit(line, width))
+    line = word
+  }
+  return line === '' ? lines : [...lines, fit(line, width)]
+}
+
+export function folderName(cwd: string): string {
+  return cwd.split('/').filter(p => p !== '').pop() ?? ''
+}
+
+export function modelName(model: string): string {
+  const parts = model.replace(/\[.*\]$/, '').replace(/^claude-/, '').replace(/-\d{8}$/, '').split('-').filter(p => p !== '')
+  const words = parts.filter(p => !/^\d+$/.test(p)).map(p => p.charAt(0).toUpperCase() + p.slice(1))
+  if (words.length === 0) return model
+  return [words.join(' '), parts.filter(p => /^\d+$/.test(p)).join('.')].filter(p => p !== '').join(' ')
+}
+
+function shortCount(n: number): string {
+  return n >= 1000000 ? `${Number((n / 1000000).toFixed(1))}M` : `${Math.round(n / 1000)}k`
+}
+
+export function usageLine(card: Card): string {
+  const hasTokens = card.contextTokens !== null && card.contextWindow !== null && card.contextWindow > 0
+  const percent = card.contextPercent ?? (hasTokens ? ((card.contextTokens ?? 0) / (card.contextWindow ?? 1)) * 100 : null)
+  const dot = percent === null ? '' : percent >= CONTEXT_FULL ? '🔴 ' : percent >= CONTEXT_WARN ? '🟡 ' : '🟢 '
+  const fill = hasTokens ? `${shortCount(card.contextTokens ?? 0)}/${shortCount(card.contextWindow ?? 0)}` : percent === null ? '' : `${Math.round(percent)}%`
+  const cost = card.costUsd === null || card.costUsd <= 0 ? '' : `$${card.costUsd.toFixed(2)}`
+  return [dot + fill, modelName(card.model), cost].filter(p => p !== '').join(' · ')
+}
+
+function cardLines(card: Card, width: number, isOwn: boolean, hotkey: string | undefined): Line[] {
+  const look = statusLook(card)
+  const color: ThemeKey = isOwn ? 'suggestion' : look.color
+  const border = isOwn ? DOUBLE : ROUND
+  const inner = Math.max(0, width - 4)
+  const line = (spans: Span[]): Line => ({ sessionId: card.sessionId, spans })
+  const row = (span: Span): Line => {
+    const pad = ' '.repeat(Math.max(0, inner - cellWidth(span.text)))
+    return line([{ text: `${border.wall} `, color }, span, { text: `${pad} ${border.wall}`, color }])
+  }
+  const word = ` ${look.word} `
+  const mark = isOwn ? '▶ ' : ''
+  const name = ` ${mark}${fit(folderName(card.cwd) || card.sessionId, width - 5 - cellWidth(mark) - cellWidth(word))} `
+  const flat = border.flat.repeat(Math.max(0, width - 2 - cellWidth(name) - cellWidth(word)))
+  const title = card.title || TITLE_READY
+  const needs = card.recap.find(l => l.startsWith(NEEDS_PREFIX))
+  const usage = usageLine(card)
+  const isBusy = card.status === 'running' || card.status === 'needs-input'
+  return [
+    line([
+      { text: border.topLeft, color },
+      { text: name, color, isBold: true },
+      { text: flat, color },
+      { text: word, color: look.color },
+      { text: border.topRight, color },
+    ]),
+    row(hotkey ? { text: `${hotkey}: ${fit(title, inner - 3)}`, hotkey } : { text: fit(title, inner), isBold: true }),
+    ...(isBusy && card.tool ? [row({ text: fit(`${look.glyph} ${card.tool}`, inner), color: look.color })] : []),
+    ...(card.branch ? [row({ text: fit(`🌿 ${card.branch}`, inner), isDim: true })] : []),
+    ...(usage ? [row({ text: fit(usage, inner), isDim: true })] : []),
+    ...(needs ? wrapWords(needs, inner, NEEDS_LINES_MAX).map(text => row({ text, color: 'warning' })) : []),
+    line([{ text: border.bottomLeft + border.flat.repeat(Math.max(0, width - 2)) + border.bottomRight, color }]),
+  ]
+}
+
+export function renderCards(list: Card[], width: number, ownId: string): Line[] {
+  const hotkeys = jumpKeys(list, ownId)
+  return list.flatMap(card => cardLines(card, width, card.sessionId === ownId, hotkeys.get(card.sessionId)))
+}
+
+export function lineText(line: Line): string {
+  return line.spans.map(s => s.text).join('')
 }
 
 export function endsWithQuestion(answer: string): boolean {
@@ -281,11 +409,12 @@ async function refresh($: EngineInterface): Promise<void> {
     if (card) next.set(entry.name, { mtimeMs: entry.mtimeMs, card })
   }
   seen = next
-  const list = visibleCards([...seen.values()].map(s => s.card), await $.clock.now())
+  const list = visibleCards([...seen.values()].map(s => s.card), await $.clock.now(), isDebug)
   const key = JSON.stringify(list)
   if (key === shown) return
   shown = key
   await update($, cards, () => list)
+  if (isDebug) await $.fs.write(debugFile(dir), renderCards(list, paneWidth, own.sessionId).map(lineText).join('\n') + '\n')
 }
 
 async function jump($: EngineInterface, card: Card): Promise<void> {
@@ -320,6 +449,7 @@ export const register: Register = on => {
     isInteractive = e.isInteractive
     if (!isInteractive) return r
     dir = feedDir(await $.env.get('CLAUDE_SIDEBAR_STATE_DIR'), await $.env.get('XDG_STATE_HOME'), await $.env.get('HOME'))
+    isDebug = (await $.env.get('CLAUDE_SIDEBAR_DEBUG')) === '1'
     const sessionId = await $.session.id()
     await publish($, {
       sessionId,
@@ -327,6 +457,7 @@ export const register: Register = on => {
       cwd: e.cwd,
       branch: await gitBranch($, e.cwd),
       status: 'idle',
+      model: await $.session.model(),
       title: sessionId === own.sessionId ? own.title : await savedTitle($, sessionId),
     })
     for (const timer of timers) timer.cancel()
@@ -338,13 +469,28 @@ export const register: Register = on => {
         })
       }),
     ]
+    if ((await $.store.get(OPEN_KEY)) === true) {
+      await refresh($)
+      await $.ui.open({ id: PANE, title: PANE_TITLE, columns: PANE_COLUMNS })
+    }
     return r
   })
 
   on('command.run', { command: 'sidebar' }, async $ => {
+    if ((await $.ui.panes()).some(p => p.id === PANE && p.isPlaced)) {
+      await $.ui.close({ id: PANE })
+      return { text: 'Sidebar closed.' }
+    }
+    await $.store.set(OPEN_KEY, true)
     await refresh($)
-    await $.ui.open({ id: PANE, title: 'Sessions', focus: true, columns: PANE_COLUMNS })
+    await $.ui.open({ id: PANE, title: PANE_TITLE, focus: true, columns: PANE_COLUMNS })
     return { text: 'Sidebar opened.' }
+  })
+
+  on('ui.close', async ($, e, next) => {
+    const r = await next(e)
+    if (e.id === PANE && e.origin.kind !== 'unload') await $.store.set(OPEN_KEY, false)
+    return r
   })
 
   on('classic.SessionStart', async ($, e, next) => {
@@ -427,7 +573,12 @@ export const register: Register = on => {
   })
 
   on('session.measure', async ($, e, next) => {
-    await publish($, { contextPercent: e.context.percent ?? null })
+    await publish($, {
+      contextPercent: e.context.percent ?? null,
+      contextTokens: e.context.tokens ?? null,
+      contextWindow: e.context.window,
+      costUsd: e.cost?.usd ?? null,
+    })
     return next(e)
   })
 
@@ -459,36 +610,25 @@ export const register: Register = on => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const list = await read($, cards)
     const width = e.props.bodyColumns
+    paneWidth = width
     if (list.length === 0) return <Text dimColor>No live sessions.</Text>
-    const hotkeys = jumpKeys(list, own.sessionId)
+    const byId = new Map(list.map(card => [card.sessionId, card]))
     return (
       <Box flexDirection="column" width={width}>
-        {list.map(card => {
-          const look = statusLook(card)
-          const isOwn = card.sessionId === own.sessionId
-          const hotkey = hotkeys.get(card.sessionId)
-          const title = card.title || metaLine(card) || card.sessionId
-          return (
-            <Box flexDirection="column" width={width} borderStyle="round" borderColor={isOwn ? 'suggestion' : look.color} paddingX={1}>
-              {hotkey ? (
-                <Button plain key={card.sessionId} hotkey={hotkey} label={title} onPress={() => jump($, card)} />
+        {renderCards(list, width, own.sessionId).map(line => (
+          <Box flexDirection="row" width={width}>
+            {line.spans.map(span => {
+              const card = byId.get(line.sessionId)
+              return span.hotkey && card ? (
+                <Button plain key={line.sessionId} hotkey={span.hotkey} label={span.text.slice(3)} onPress={() => jump($, card)} />
               ) : (
-                <Text bold wrap="truncate-end">
-                  {title}
+                <Text color={span.color} bold={span.isBold} dimColor={span.isDim} wrap="truncate-end">
+                  {span.text}
                 </Text>
-              )}
-              <Text color={look.color} wrap="truncate-end">
-                {look.glyph} {look.label}
-              </Text>
-              <Text dimColor wrap="truncate-end">
-                {metaLine(card)}
-              </Text>
-              {card.recap.map(line => (
-                <Text wrap="wrap">{line}</Text>
-              ))}
-            </Box>
-          )
-        })}
+              )
+            })}
+          </Box>
+        ))}
       </Box>
     )
   })
