@@ -1,6 +1,6 @@
 import { expect, mock, test, type Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { SPINNER, cellWidth, debugFile, feedDir, fit, jumpKeys, lineText, modelName, renderCards, statusLook, toCard, usageLine, visibleCards, wrapWords } from '../hooks/register.tsx'
+import { SPINNER, cellWidth, debugFile, feedDir, fit, jumpKeys, lineText, modelName, recapLines, renderCards, statusLook, toCard, usageLine, visibleCards, wrapWords } from '../hooks/register.tsx'
 import type { Card } from '../types'
 
 const SID = 'sess-1'
@@ -265,6 +265,12 @@ test('the spinner turns while the pane is open and a card runs, and stops otherw
   const shut = await paneText($)
   await clock.advance(SPIN_MS * 3)
   expect(await paneText($)).toBe(shut)
+})
+
+test('a recap keeps the Needs line only, and nothing when the agent asks nothing', () => {
+  expect(recapLines('**Needs:** pick a port\nDid: moved the reaper')).toEqual(['Needs: pick a port'])
+  expect(recapLines('Needs: -')).toEqual([])
+  expect(recapLines('Did: moved the reaper')).toEqual([])
 })
 
 test('the own card has a double border and no hotkey, and an empty title reads Ready', () => {
