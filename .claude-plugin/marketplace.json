@@ -1,0 +1,9 @@
+{
+  "name": "claude-mods",
+  "description": "Mods and skills for Claude Code.",
+  "owner": {
+    "name": "llkhacquan",
+    "url": "https://github.com/llkhacquan"
+  },
+  "plugins": []
+}
