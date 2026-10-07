@@ -1,0 +1,8 @@
+{
+  "name": "sidebar",
+  "version": "0.1.0",
+  "description": "Shows every live Claude Code session as a card in a side pane: title, status, current tool, git branch, model, context use and a last-turn recap. No tmux or daemon needed; in tmux a card's hotkey jumps to that session's pane",
+  "author": { "name": "llkhacquan" },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

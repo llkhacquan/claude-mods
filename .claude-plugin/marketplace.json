@@ -11,6 +11,12 @@
       "description": "Answers permission prompts for you: allows routine tool calls, asks you on risky ones",
       "source": "./plugins/auto-approve",
       "category": "security"
+    },
+    {
+      "name": "sidebar",
+      "description": "Shows every live Claude Code session as a card in a side pane, with an optional tmux jump",
+      "source": "./plugins/sidebar",
+      "category": "productivity"
     }
   ]
 }
