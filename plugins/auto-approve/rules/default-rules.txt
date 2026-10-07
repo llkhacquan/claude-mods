@@ -1,0 +1,51 @@
+# Global rules for the auto-approve gate. One rule per line, plain language.
+# Lines that start with # are dropped before the model reads the file.
+# Edit freely. `/auto-approve learn` suggests new lines from your approval history.
+
+proj = the working directory and the git repository it belongs to, including its worktrees.
+scratch = /tmp, /private/tmp, $TMPDIR, at any depth.
+Absolute paths, long tmp paths and $VAR indirection are not danger signals. Judge the resolved path.
+DENY wins over ASK, and ASK wins over ALLOW.
+
+DENY: write or rm outside proj and scratch. Any write to /etc, /usr, /System, /bin, /sbin
+DENY: read, print or copy secrets: .env files, credentials, private keys, ~/.ssh, ~/.aws, ~/.gnupg, ~/.netrc, shell rc files
+DENY: git push --force or -f, or git branch -D, on main/master/develop/prod. git reset --hard with no ref
+DENY: DROP or TRUNCATE on any database. DELETE or UPDATE with no WHERE. Any write to a production database
+DENY: curl or wget piped into a shell. Killing system or OS processes
+DENY: sudo. System-wide pip install outside a virtualenv
+
+ALLOW: read-only commands anywhere: cat, head, tail, sed -n, grep, rg, ls, find, file, strings, wc, diff, stat
+ALLOW: edit, create, move and delete files inside proj. Full read and write in scratch, at any depth
+ALLOW: rm and rm -rf of paths inside proj or scratch. Never the root of proj, never the home directory
+ALLOW: chmod +x inside proj or scratch
+ALLOW: a path held in a shell variable, then read or written through it, when the resolved path is in proj or scratch
+ASK: running a script file from scratch or from outside proj. Its content is unseen. Inline code (heredoc, -c) is judged on its text
+
+ALLOW: git add, commit, fetch, pull, stash, cherry-pick, worktree, switch, checkout of a branch, reset --soft/--mixed/--hard <ref>
+ALLOW: git push of a non-protected branch with no force flag. The gate already asks for protected branches, force and deletion
+ASK: git push to main/master/develop/prod/staging/release*, any force, delete, mirror or tags push, gh pr create, gh release create
+ASK: git branch -D, git rebase, git clean, git checkout or restore that throws away uncommitted work
+ALLOW: gh read commands: view, list, status, checks, diff, search, run watch, auth status. gh api GET
+ASK: gh commands that change something on GitHub: merge, close, delete, edit, gh api with POST/PATCH/PUT/DELETE
+
+ALLOW: build, test, lint and format inside proj: go, cargo, make, npm/pnpm/yarn/bun run and test, pytest, tsc, eslint
+ALLOW: install dependencies inside proj: npm/pnpm/yarn install, go mod, cargo fetch, pip install inside a virtualenv
+ASK: global installs (npm install -g, brew install, cargo install). npm publish, cargo publish, any package publish
+ALLOW: run a binary or script that lives inside proj. Start, stop and restart a local dev server on localhost
+ALLOW: kill or pkill a process the session started, or a dev server by port (kill $(lsof -ti :PORT))
+
+ALLOW: docker read-only: ps, images, inspect, logs, version. docker compose up/down/build/logs inside proj. docker run --rm
+ASK: docker with --privileged, --cap-add, --network=host, --pid=host, or a mount of / or the home directory
+ALLOW: kubectl read-only: get, describe, logs, top. ASK: kubectl apply, delete, exec, scale, patch, rollout, edit
+ALLOW: cloud CLI read-only (aws, gcloud, az: list, describe, show, get). ASK: any create, update, delete, start, stop
+
+ALLOW: psql, mysql, sqlite3 against localhost or a file inside proj
+ASK: any query against a remote database
+
+ALLOW: curl or wget to localhost, any method. curl GET to a public URL with no auth header
+ASK: curl POST/PUT/PATCH/DELETE to a remote host. Any request that sends a token, cookie or key
+ALLOW: ping, dig, nslookup, traceroute
+
+ASK: any MCP tool or other tool that sends a message, posts, publishes, deletes, or changes data in an outside service
+ALLOW: MCP tools that only read, search, list or fetch
+ASK: anything that fits no rule above

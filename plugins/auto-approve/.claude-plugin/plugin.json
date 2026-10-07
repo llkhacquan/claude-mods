@@ -1,0 +1,7 @@
+{
+  "name": "auto-approve",
+  "version": "0.1.0",
+  "description": "Answers permission prompts for you: regex layers allow routine tool calls and always ask on pushes to protected branches, and haiku judges the rest against your plain-text rules. Logs every decision so /auto-approve learn can suggest new rules",
+  "author": { "name": "llkhacquan" },
+  "license": "MIT"
+}

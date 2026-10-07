@@ -5,5 +5,12 @@
     "name": "llkhacquan",
     "url": "https://github.com/llkhacquan"
   },
-  "plugins": []
+  "plugins": [
+    {
+      "name": "auto-approve",
+      "description": "Answers permission prompts for you: allows routine tool calls, asks you on risky ones",
+      "source": "./plugins/auto-approve",
+      "category": "security"
+    }
+  ]
 }
