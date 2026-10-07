@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, ThemeKey, Timer } from 'claude-code'
+import type { Color, EngineInterface, Register, ThemeKey, Timer } from 'claude-code'
 
 import type { Card, Status } from '../types'
 
@@ -29,6 +29,13 @@ const RECAP_LINE_MAX = 200
 const NEEDS_PREFIX = 'Needs: '
 const FILE_TOOLS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit']
 export const SPINNER = ['✦', '✧', '✶', '✷', '✸', '✹', '✺', '✻']
+const RAINBOW = ['#F38BA8', '#FAB387', '#F9E2AF', '#A6E3A1', '#94E2D5', '#89B4FA', '#CBA6F7']
+const COMET_DIM = '#6C7086'
+const COMET_LENGTH = 16
+const COMET_SWEEP_FRAMES = 20
+const COMET_CYCLE_FRAMES = 40
+const COMET_FAINT = 0.05
+const COMET_BOLD = 0.7
 const STATUSES: Status[] = ['idle', 'running', 'needs-input', 'ended']
 const REPLY_START = /^(i\s|i['’]|(sorry|unfortunately|sure|certainly|here['’]?s|as an ai)\b)/i
 
@@ -61,7 +68,7 @@ const WIDE =
 type Look = { word: string; glyph: string; color: ThemeKey }
 type Border = { topLeft: string; topRight: string; bottomLeft: string; bottomRight: string; flat: string; wall: string }
 
-export type Span = { text: string; color?: ThemeKey; isBold?: boolean; isDim?: boolean; hotkey?: string }
+export type Span = { text: string; color?: Color; isBold?: boolean; isDim?: boolean; hotkey?: string }
 export type Line = { sessionId: string; spans: Span[] }
 
 const ROUND: Border = { topLeft: '╭', topRight: '╮', bottomLeft: '╰', bottomRight: '╯', flat: '─', wall: '│' }
@@ -226,6 +233,66 @@ export function usageLine(card: Card): string {
   return [dot + fill, modelName(card.model), cost].filter(p => p !== '').join(' · ')
 }
 
+export function perimeterIndex(row: number, col: number, height: number, width: number): number | null {
+  if (row < 0 || col < 0 || row >= height || col >= width) return null
+  if (row === 0) return col
+  if (row === height - 1) return width + (height - 2) + (width - 1 - col)
+  if (col === width - 1) return width + (row - 1)
+  if (col === 0) return 2 * width + 2 * height - 4 - row
+  return null
+}
+
+function blend(from: string, to: string, share: number): string {
+  const channel = (hex: string, at: number) => parseInt(hex.slice(at, at + 2), 16)
+  return (
+    '#' +
+    [1, 3, 5]
+      .map(at => Math.round(channel(from, at) + (channel(to, at) - channel(from, at)) * share).toString(16).padStart(2, '0'))
+      .join('')
+      .toUpperCase()
+  )
+}
+
+export function cometCell(spin: number, row: number, col: number, height: number, width: number): { color: string; isBold: boolean } | null {
+  const phase = spin % COMET_CYCLE_FRAMES
+  const cell = perimeterIndex(row, col, height, width)
+  if (phase >= COMET_SWEEP_FRAMES || cell === null || height < 2 || width < 4) return null
+  const total = 2 * width + 2 * height - 4
+  const head = Math.floor((phase * total) / COMET_SWEEP_FRAMES)
+  const offset = (head + total - cell) % total
+  if (offset >= COMET_LENGTH) return null
+  const strength = (1 - offset / COMET_LENGTH) ** 2
+  if (strength < COMET_FAINT) return null
+  const bright = RAINBOW[(spin + Math.floor(offset / 3)) % RAINBOW.length] ?? COMET_DIM
+  return { color: blend(COMET_DIM, bright, strength), isBold: strength > COMET_BOLD }
+}
+
+function cometLine(line: Line, row: number, height: number, width: number, spin: number): Line {
+  const spans: Span[] = []
+  let col = 0
+  for (const span of line.spans) {
+    if (span.hotkey) {
+      spans.push(span)
+      col += cellWidth(span.text)
+      continue
+    }
+    let plain = ''
+    for (const ch of span.text) {
+      const lit = cometCell(spin, row, col, height, width)
+      col += cellWidth(ch)
+      if (!lit) {
+        plain += ch
+        continue
+      }
+      if (plain !== '') spans.push({ ...span, text: plain })
+      plain = ''
+      spans.push({ text: ch, color: lit.color, isBold: lit.isBold })
+    }
+    if (plain !== '') spans.push({ ...span, text: plain })
+  }
+  return { sessionId: line.sessionId, spans }
+}
+
 function cardLines(card: Card, width: number, isOwn: boolean, hotkey: string | undefined, spin: number): Line[] {
   const look = statusLook(card)
   const color: ThemeKey = isOwn ? 'suggestion' : look.color
@@ -244,7 +311,7 @@ function cardLines(card: Card, width: number, isOwn: boolean, hotkey: string | u
   const needs = card.recap.find(l => l.startsWith(NEEDS_PREFIX))
   const usage = usageLine(card)
   const isBusy = card.status === 'running' || card.status === 'needs-input'
-  return [
+  const lines = [
     line([
       { text: border.topLeft, color },
       { text: name, color, isBold: true },
@@ -259,6 +326,7 @@ function cardLines(card: Card, width: number, isOwn: boolean, hotkey: string | u
     ...(needs ? wrapWords(needs, inner, NEEDS_LINES_MAX).map(text => row({ text, color: 'warning' })) : []),
     line([{ text: border.bottomLeft + border.flat.repeat(Math.max(0, width - 2)) + border.bottomRight, color }]),
   ]
+  return card.status === 'running' ? lines.map((l, n) => cometLine(l, n, lines.length, width, spin)) : lines
 }
 
 export function renderCards(list: Card[], width: number, ownId: string, spin = 0): Line[] {

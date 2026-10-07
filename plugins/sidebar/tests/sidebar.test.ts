@@ -1,6 +1,6 @@
 import { expect, mock, test, type Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { SPINNER, cellWidth, debugFile, feedDir, fit, jumpKeys, lineText, modelName, recapLines, renderCards, statusLook, toCard, usageLine, visibleCards, wrapWords } from '../hooks/register.tsx'
+import { SPINNER, cellWidth, cometCell, debugFile, feedDir, fit, jumpKeys, lineText, modelName, perimeterIndex, recapLines, renderCards, statusLook, toCard, usageLine, visibleCards, wrapWords } from '../hooks/register.tsx'
 import type { Card } from '../types'
 
 const SID = 'sess-1'
@@ -265,6 +265,39 @@ test('the spinner turns while the pane is open and a card runs, and stops otherw
   const shut = await paneText($)
   await clock.advance(SPIN_MS * 3)
   expect(await paneText($)).toBe(shut)
+})
+
+test('the border cells count clockwise from the top left corner', () => {
+  expect(perimeterIndex(0, 0, 5, 10)).toBe(0)
+  expect(perimeterIndex(0, 9, 5, 10)).toBe(9)
+  expect(perimeterIndex(4, 9, 5, 10)).toBe(13)
+  expect(perimeterIndex(4, 0, 5, 10)).toBe(22)
+  expect(perimeterIndex(1, 0, 5, 10)).toBe(25)
+  expect(perimeterIndex(2, 5, 5, 10)).toBe(null)
+})
+
+test('the comet head is the brightest cell, the tail fades, and it rests for half the cycle', () => {
+  expect(cometCell(0, 0, 0, 6, 40)).toEqual({ color: '#F38BA8', isBold: true })
+  expect(cometCell(10, 5, 39, 6, 40)).toMatchObject({ isBold: true })
+  expect(cometCell(10, 5, 38, 6, 40)).toBe(null)
+  expect(cometCell(10, 4, 39, 6, 40)).toMatchObject({ isBold: true })
+  expect(cometCell(10, 0, 39, 6, 40)).toMatchObject({ isBold: false })
+  expect(cometCell(10, 0, 20, 6, 40)).toBe(null)
+  expect(cometCell(10, 2, 20, 6, 40)).toBe(null)
+  expect(cometCell(20, 0, 0, 6, 40)).toBe(null)
+  expect(cometCell(40, 0, 0, 6, 40)).toMatchObject({ isBold: true })
+})
+
+test('the comet colors border cells of a running card only and leaves the text as it was', () => {
+  const lit = (list: Card[], spin: number) => renderCards(list, 40, 'me', spin).flatMap(l => l.spans).filter(s => s.color?.startsWith('#'))
+  const running = [card({ sessionId: 'a', status: 'running', tool: 'Bash: ls' })]
+  expect(lit(running, 5).length).toBe(13)
+  expect(lit(running, 5).map(s => cellWidth(s.text))).toEqual(lit(running, 5).map(() => 1))
+  expect(lit(running, 29)).toEqual([])
+  expect(lit([card({ sessionId: 'a' })], 5)).toEqual([])
+  expect(lit([card({ sessionId: 'a', status: 'needs-input' })], 5)).toEqual([])
+  expect(drawn(running, 40, 'me', 5)).toEqual(drawn(running, 40, 'me', 29))
+  expect(renderCards(running, 40, 'me', 5).flatMap(l => l.spans).filter(s => s.hotkey).length).toBe(1)
 })
 
 test('a recap keeps the Needs line only, and nothing when the agent asks nothing', () => {
