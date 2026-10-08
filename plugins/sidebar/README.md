@@ -89,6 +89,16 @@ session C ─┘ on each event + every 30s                        └─► pane
 
 Start a session with `CLAUDE_SIDEBAR_DEBUG=1`. It then keeps cards older than 90 seconds, and writes the drawn pane as plain text to `debug/pane.txt` beside the feed folder each time the cards change. Point `CLAUDE_SIDEBAR_STATE_DIR` at a scratch folder with hand-made card files to see every card state from one session.
 
+## Develop
+
+```bash
+claude plugin validate plugins/sidebar
+claude plugin test plugins/sidebar
+npx -p typescript tsc -p plugins/sidebar
+```
+
+`tsc` needs `.claude-plugin/types/`, which is not in the repo. Claude Code writes that folder the first time it loads the mod: start one session with `claude --plugin-dir plugins/sidebar`.
+
 ## Cost
 
 The title and the recap each use one small Haiku call: a title per prompt you type, a recap per long turn (5 or more tool calls, or a long answer). Nothing else calls a model.
