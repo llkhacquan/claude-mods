@@ -576,7 +576,7 @@ async function purge($: EngineInterface, paths: string[]): Promise<void> {
 async function publish($: EngineInterface, patch: Partial<Card>): Promise<void> {
   const updatedAt = await $.clock.now()
   const isNewSession = patch.sessionId !== undefined && patch.sessionId !== own.sessionId
-  if (own.status === 'ended' && !isNewSession) return
+  if (own.status === 'ended' && patch.sessionId === undefined) return
   const fields = Object.keys(patch) as (keyof Card)[]
   if (fields.length > 0 && fields.every(f => JSON.stringify(patch[f]) === JSON.stringify(own[f]))) return
   const isNewStatus = patch.status !== undefined && patch.status !== own.status

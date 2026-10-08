@@ -441,6 +441,17 @@ test('a tool call beside one that waits for the person keeps the card on needs i
   expect(own().status).toBe('running')
 })
 
+test('a session that starts again after it ended is idle again', async ($, on) => {
+  const { own } = harness(on)
+
+  await start($)
+  await $.session.end({ sessionId: SID, reason: 'prompt_input_exit', resume: { id: SID } })
+  expect(own().status).toBe('ended')
+
+  await start($)
+  expect(own().status).toBe('idle')
+})
+
 test('a patch that changes nothing writes no card and sends no signal', async ($, on) => {
   const { ran, clock, own } = harness(on)
   const signals = () => ran.filter(argv => argv[0] === 'tee')
