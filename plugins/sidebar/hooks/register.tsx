@@ -20,6 +20,7 @@ const TAIL = '/usr/bin/tail'
 const SIGNAL_TIMEOUT_MS = 3000
 const SIGNAL_MAX_BYTES = 65536
 const WAKE_GAP_MS = 100
+const SIGNAL_GAP_MS = 100
 const SPIN_MS = 150
 const STALE_MS = 90000
 const MINUTE_MS = 60000
@@ -119,6 +120,8 @@ let signalPath = ''
 let watcher: HookStream<ProcessSpawnChunk, ProcessSpawnResult> | null = null
 let lastWake = 0
 let lateWake: Timer | null = null
+let lastSignal = 0
+let lateSignal: Timer | null = null
 let own: Card = freshCard('', '', '')
 let writing: Promise<void> = Promise.resolve()
 let seen = new Map<string, { mtimeMs: number; card: Card }>()
@@ -534,8 +537,7 @@ async function readGit($: EngineInterface, cwd: string): Promise<GitState> {
   }
 }
 
-async function signal($: EngineInterface): Promise<void> {
-  if (!signalPath) return
+async function appendSignal($: EngineInterface): Promise<void> {
   try {
     await $.process.run(['tee', '-a', signalPath], { stdin: '\n', timeoutMs: SIGNAL_TIMEOUT_MS })
   } catch (err) {
@@ -543,10 +545,29 @@ async function signal($: EngineInterface): Promise<void> {
   }
 }
 
+async function signal($: EngineInterface): Promise<void> {
+  if (!signalPath || lateSignal) return
+  const now = await $.clock.now()
+  if (lateSignal) return
+  const wait = lastSignal + SIGNAL_GAP_MS - now
+  if (wait <= 0) {
+    lastSignal = now
+    await appendSignal($)
+    return
+  }
+  lateSignal = $.clock.after(wait, () => {
+    lateSignal = null
+    lastSignal = now + wait
+    void appendSignal($)
+  })
+}
+
 async function publish($: EngineInterface, patch: Partial<Card>): Promise<void> {
   const updatedAt = await $.clock.now()
   const isNewSession = patch.sessionId !== undefined && patch.sessionId !== own.sessionId
   if (own.status === 'ended' && !isNewSession) return
+  const fields = Object.keys(patch) as (keyof Card)[]
+  if (fields.length > 0 && fields.every(f => JSON.stringify(patch[f]) === JSON.stringify(own[f]))) return
   const isNewStatus = patch.status !== undefined && patch.status !== own.status
   const since = isNewSession || isNewStatus || own.since === 0 ? updatedAt : own.since
   const base = isNewSession ? { ...freshCard(own.paneId, own.cwd, own.branch), changed: own.changed, unpushed: own.unpushed } : own
@@ -557,7 +578,7 @@ async function publish($: EngineInterface, patch: Partial<Card>): Promise<void> 
     $.ui.log(`sidebar: write failed: ${err}`)
   })
   await writing
-  if (Object.keys(patch).length > 0) void signal($)
+  if (fields.length > 0) void signal($)
 }
 
 async function syncSpinner($: EngineInterface): Promise<void> {

@@ -8,6 +8,7 @@ const DIR = '/state/feed'
 const NOW = 1000000
 const HEARTBEAT_MS = 30000
 const WAKE_GAP_MS = 100
+const SIGNAL_GAP_MS = 100
 const SPIN_MS = 150
 const GIT_STATUS = [
   '# branch.oid 1f2e3d',
@@ -315,7 +316,7 @@ test('a heartbeat that lands inside a new start leaves one tail for that start',
 
   await start($)
   const write = hold('write', `${DIR}/${SID}.json`)
-  const again = start($)
+  const again = $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/api' })
   await write.reached
   await clock.advance(HEARTBEAT_MS)
   write.release()
@@ -395,6 +396,41 @@ test('a changed card and a changed mode append to the signal file, a heartbeat d
   expect(signals().length).toBe(2)
 
   await $.command.run(RUN)
+  expect(signals().length).toBe(2)
+
+  await clock.advance(SIGNAL_GAP_MS)
+  expect(signals().length).toBe(3)
+})
+
+test('a patch that changes nothing writes no card and sends no signal', async ($, on) => {
+  const { ran, clock, own } = harness(on)
+  const signals = () => ran.filter(argv => argv[0] === 'tee')
+
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await clock.advance(1000)
+  await $.tool.call({ tool: 'Bash', command: 'go test ./...' })
+  const written = own().updatedAt
+  const sent = signals().length
+
+  await clock.advance(1000)
+  await $.tool.call({ tool: 'Bash', command: 'go test ./...' })
+  expect(own().updatedAt).toBe(written)
+  expect(signals().length).toBe(sent)
+})
+
+test('card changes in a burst send one signal now and one after the gap', async ($, on) => {
+  const { ran, clock } = harness(on)
+  const signals = () => ran.filter(argv => argv[0] === 'tee')
+
+  await start($)
+  await clock.advance(1000)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.tool.call({ tool: 'Bash', command: 'go build ./...' })
+  await $.tool.call({ tool: 'Bash', command: 'go test ./...' })
+  expect(signals().length).toBe(2)
+
+  await clock.advance(SIGNAL_GAP_MS)
   expect(signals().length).toBe(3)
 })
 

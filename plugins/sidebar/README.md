@@ -75,6 +75,7 @@ session C ─┘ on each event + every 30s                        └─► pane
 
 - No polling. Each session keeps one `/usr/bin/tail -n 0 -F` on the `signal` file. A session appends one byte after it changes its card or the pane state, the kernel wakes every `tail`, and each session reads the cards and the pane state once. Measured on macOS: about 5 ms from the append to the redraw.
 - Signals in a burst are batched: a session reads at once on the first one, then at most once every 100 ms. So a busy session does not make the idle ones read on each of its tool calls.
+- The writer keeps its disk and process work low too. A change that leaves the card as it was writes nothing, and a session appends to the `signal` file at most once every 100 ms: the first change at once, the rest of a burst as one append after the gap.
 - The path is `/usr/bin/tail` on purpose. GNU `tail` on macOS has no file events and polls once a second.
 - The 30 second heartbeat also reads the cards and the pane state, and starts `tail` again when it has died. So a missed signal costs at most 30 seconds.
 - A new session empties the `signal` file once it is over 64 KB.
