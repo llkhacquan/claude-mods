@@ -6,6 +6,7 @@ export type Card = {
   cwd: string
   branch: string
   status: Status
+  since: number
   asked: boolean
   tool: string
   model: string

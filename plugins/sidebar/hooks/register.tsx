@@ -14,6 +14,7 @@ const HEARTBEAT_MS = 30000
 const POLL_MS = 2000
 const SPIN_MS = 150
 const STALE_MS = 90000
+const MINUTE_MS = 60000
 const JUMP_KEYS = 9
 const GIT_TIMEOUT_MS = 3000
 const TARGET_MAX = 120
@@ -85,6 +86,7 @@ function freshCard(paneId: string, cwd: string, branch: string): Card {
     cwd,
     branch,
     status: 'idle',
+    since: 0,
     asked: false,
     tool: '',
     model: '',
@@ -142,6 +144,7 @@ export function toCard(raw: unknown): Card | null {
     cwd: text('cwd'),
     branch: text('branch'),
     status,
+    since: count('since') ?? 0,
     asked: r['asked'] === true,
     tool: text('tool'),
     model: text('model'),
@@ -175,6 +178,13 @@ export function statusLook(card: Card): Look {
   if (card.status === 'running') return { word: 'running', glyph: '⚡', color: 'success' }
   if (card.asked) return { word: 'asked you', glyph: '?', color: 'warning' }
   return { word: 'idle', glyph: '○', color: 'subtle' }
+}
+
+export function ageLabel(since: number, now: number): string {
+  const minutes = Math.floor((now - since) / MINUTE_MS)
+  if (since <= 0 || minutes < 1) return ''
+  if (minutes < 60) return `${minutes}m`
+  return minutes < 1440 ? `${Math.floor(minutes / 60)}h` : `${Math.floor(minutes / 1440)}d`
 }
 
 export function cellWidth(text: string): number {
@@ -308,7 +318,7 @@ function paintLine(line: Line, row: number, height: number, width: number, spin:
   return { sessionId: line.sessionId, spans }
 }
 
-function cardLines(card: Card, width: number, isOwn: boolean, hotkey: string | undefined, spin: number): Line[] {
+function cardLines(card: Card, width: number, isOwn: boolean, hotkey: string | undefined, spin: number, now: number): Line[] {
   const look = statusLook(card)
   const color: Color = isOwn ? 'suggestion' : card.status === 'running' ? PEACH : look.color
   const border = isOwn ? DOUBLE : ROUND
@@ -318,7 +328,8 @@ function cardLines(card: Card, width: number, isOwn: boolean, hotkey: string | u
     const pad = ' '.repeat(Math.max(0, inner - cellWidth(span.text)))
     return line([{ text: `${border.wall} `, color }, span, { text: `${pad} ${border.wall}`, color }])
   }
-  const word = card.status === 'running' ? ` ${SPINNER[spin % SPINNER.length]} ${look.word} ` : ` ${look.word} `
+  const age = card.status === 'idle' ? ageLabel(card.since, now) : ''
+  const word = card.status === 'running' ? ` ${SPINNER[spin % SPINNER.length]} ${look.word} ` : age ? ` ${look.word} ${age} ` : ` ${look.word} `
   const mark = isOwn ? '▶ ' : ''
   const room = width - 5 - cellWidth(mark) - cellWidth(word)
   const name = ` ${mark}${folderName(card.cwd, room) || fit(card.sessionId, room)} `
@@ -345,9 +356,9 @@ function cardLines(card: Card, width: number, isOwn: boolean, hotkey: string | u
   return card.status === 'running' ? lines.map((l, n) => paintLine(l, n, lines.length, width, spin)) : lines
 }
 
-export function renderCards(list: Card[], width: number, ownId: string, spin = 0): Line[] {
+export function renderCards(list: Card[], width: number, ownId: string, spin = 0, now = 0): Line[] {
   const hotkeys = jumpKeys(list, ownId)
-  return list.flatMap(card => cardLines(card, width, card.sessionId === ownId, hotkeys.get(card.sessionId), spin))
+  return list.flatMap(card => cardLines(card, width, card.sessionId === ownId, hotkeys.get(card.sessionId), spin, now))
 }
 
 export function lineText(line: Line): string {
@@ -451,10 +462,9 @@ async function loadCard($: EngineInterface, path: string): Promise<Card | null> 
   }
 }
 
-async function savedTitle($: EngineInterface, sessionId: string): Promise<string> {
+async function savedCard($: EngineInterface, sessionId: string): Promise<Card | null> {
   const path = `${dir}/${sessionId}.json`
-  if (!(await $.fs.exists(path))) return ''
-  return (await loadCard($, path))?.title ?? ''
+  return (await $.fs.exists(path)) ? loadCard($, path) : null
 }
 
 async function gitBranch($: EngineInterface, cwd: string): Promise<string> {
@@ -470,7 +480,9 @@ async function publish($: EngineInterface, patch: Partial<Card>): Promise<void> 
   const updatedAt = await $.clock.now()
   const isNewSession = patch.sessionId !== undefined && patch.sessionId !== own.sessionId
   if (own.status === 'ended' && !isNewSession) return
-  own = { ...(isNewSession ? freshCard(own.paneId, own.cwd, own.branch) : own), ...patch, updatedAt }
+  const isNewStatus = patch.status !== undefined && patch.status !== own.status
+  const since = isNewSession || isNewStatus || own.since === 0 ? updatedAt : own.since
+  own = { ...(isNewSession ? freshCard(own.paneId, own.cwd, own.branch) : own), since, ...patch, updatedAt }
   if (!own.sessionId || !dir) return
   const snapshot = own
   writing = writing.then(() => $.fs.write(`${dir}/${snapshot.sessionId}.json`, JSON.stringify(snapshot) + '\n')).catch(err => {
@@ -503,14 +515,15 @@ async function refresh($: EngineInterface): Promise<void> {
     if (card) next.set(entry.name, { mtimeMs: entry.mtimeMs, card })
   }
   seen = next
-  const list = visibleCards([...seen.values()].map(s => s.card), await $.clock.now(), isDebug)
+  const now = await $.clock.now()
+  const list = visibleCards([...seen.values()].map(s => s.card), now, isDebug)
   const key = JSON.stringify(list)
   if (key === shown) return
   shown = key
   isAnyRunning = list.some(c => c.status === 'running')
   await update($, cards, () => list)
   await syncSpinner($)
-  if (isDebug) await $.fs.write(debugFile(dir), renderCards(list, paneWidth, own.sessionId).map(lineText).join('\n') + '\n')
+  if (isDebug) await $.fs.write(debugFile(dir), renderCards(list, paneWidth, own.sessionId, 0, now).map(lineText).join('\n') + '\n')
 }
 
 async function jump($: EngineInterface, card: Card): Promise<void> {
@@ -547,6 +560,7 @@ export const register: Register = on => {
     dir = feedDir(await $.env.get('CLAUDE_SIDEBAR_STATE_DIR'), await $.env.get('XDG_STATE_HOME'), await $.env.get('HOME'))
     isDebug = (await $.env.get('CLAUDE_SIDEBAR_DEBUG')) === '1'
     const sessionId = await $.session.id()
+    const saved = sessionId === own.sessionId ? own : await savedCard($, sessionId)
     await publish($, {
       sessionId,
       paneId: (await $.env.get('TMUX_PANE')) ?? '',
@@ -554,7 +568,8 @@ export const register: Register = on => {
       branch: await gitBranch($, e.cwd),
       status: 'idle',
       model: await $.session.model(),
-      title: sessionId === own.sessionId ? own.title : await savedTitle($, sessionId),
+      title: saved?.title ?? '',
+      ...(saved?.status === 'idle' && saved.since > 0 ? { since: saved.since } : {}),
     })
     for (const timer of timers) timer.cancel()
     spinner?.cancel()
@@ -600,7 +615,7 @@ export const register: Register = on => {
     if (isCleared || (own.sessionId !== '' && e.session_id !== own.sessionId)) {
       titleSeq++
       recapSeq++
-      const title = isCleared ? TITLE_READY : await savedTitle($, e.session_id)
+      const title = isCleared ? TITLE_READY : ((await savedCard($, e.session_id))?.title ?? '')
       await publish($, { sessionId: e.session_id, status: 'idle', asked: false, tool: '', title, recap: [] })
     }
     return next(e)
@@ -712,13 +727,14 @@ export const register: Register = on => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const list = await read($, cards)
     const spin = await read($, frame)
+    const now = await $.clock.now()
     const width = e.props.bodyColumns
     paneWidth = width
     if (list.length === 0) return <Text dimColor>No live sessions.</Text>
     const byId = new Map(list.map(card => [card.sessionId, card]))
     return (
       <Box flexDirection="column" width={width}>
-        {renderCards(list, width, own.sessionId, spin).map(line => (
+        {renderCards(list, width, own.sessionId, spin, now).map(line => (
           <Box flexDirection="row" width={width}>
             {line.spans.map(span => {
               const card = byId.get(line.sessionId)

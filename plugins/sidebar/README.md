@@ -9,7 +9,7 @@ A side pane that shows every live Claude Code session on this machine as a card.
 │ 🌿 fix/login                             │
 │ 🟢 416k/1M · Opus 5.5 · $2.20            │
 ╰──────────────────────────────────────────╯
-╭ work/web ──────────────────── asked you ╮
+╭ work/web ──────────────── asked you 12m ╮
 │ 2: Draft release notes                   │
 │ 🌿 main                                  │
 │ 🟢 36k/200k · Sonnet 5.5 · $0.41         │
@@ -40,7 +40,7 @@ Each card shows:
 
 | Line | What |
 |------|------|
-| Top border | The folder with its parent (the folder alone when the border is too narrow), and the status: `running`, `needs input`, `asked you` (it ended its turn with a question), `idle`. A running card has a spinner beside the word a rainbow gradient that flows around its border, and a brighter comet that runs a lap over it, then rests; all three move only while the pane is open |
+| Top border | The folder with its parent (the folder alone when the border is too narrow), and the status: `running`, `needs input`, `asked you` (it ended its turn with a question), `idle`. An `idle` or `asked you` card adds how long it has waited (`12m`, `3h`, `2d`), from one minute on. A running card has a spinner beside the word a rainbow gradient that flows around its border, and a brighter comet that runs a lap over it, then rests; all three move only while the pane is open |
 | Title | A 3-6 word label of what the session is working on |
 | Tool | `⚡` and the current tool while it runs, `▲` and the tool that waits for you |
 | Branch | `🌿` and the git branch |

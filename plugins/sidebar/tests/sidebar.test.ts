@@ -1,6 +1,6 @@
 import { expect, mock, test, type Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { SPINNER, cellWidth, cometCell, debugFile, feedDir, fit, folderName, jumpKeys, lineText, modelName, perimeterIndex, recapLines, renderCards, statusLook, toCard, usageLine, visibleCards, wrapWords } from '../hooks/register.tsx'
+import { SPINNER, ageLabel, cellWidth, cometCell, debugFile, feedDir, fit, folderName, jumpKeys, lineText, modelName, perimeterIndex, recapLines, renderCards, statusLook, toCard, usageLine, visibleCards, wrapWords } from '../hooks/register.tsx'
 import type { Card } from '../types'
 
 const SID = 'sess-1'
@@ -26,6 +26,7 @@ function card(patch: Partial<Card>): Card {
     cwd: '/work/api',
     branch: 'main',
     status: 'idle',
+    since: 0,
     asked: false,
     tool: '',
     model: 'claude-opus-5-5',
@@ -110,8 +111,8 @@ async function paneText($: Engine): Promise<string> {
   return texts.join('')
 }
 
-function drawn(list: Card[], width: number, ownId = '', spin = 0): string[] {
-  return renderCards(list, width, ownId, spin).map(lineText)
+function drawn(list: Card[], width: number, ownId = '', spin = 0, now = 0): string[] {
+  return renderCards(list, width, ownId, spin, now).map(lineText)
 }
 
 test('a session publishes its card with no tmux, and a turn moves it from idle to running and back', async ($, on) => {
@@ -236,6 +237,63 @@ test('the folder shows with its parent, and alone when the border has no room', 
   expect(folderName('/work', 20)).toBe('work')
   expect(folderName('/', 20)).toBe('')
   expect(drawn([card({ sessionId: 'a', cwd: '/work/custody/a-long-folder-name' })], 30, 'me')[0]).toBe('╭ a-long-folder-name ── idle ╮')
+})
+
+test('an age reads in minutes, hours, then days, and stays empty under a minute or with no start', () => {
+  const at = 10 * 86400000
+  expect(ageLabel(at - 59000, at)).toBe('')
+  expect(ageLabel(at - 60000, at)).toBe('1m')
+  expect(ageLabel(at - 59 * 60000, at)).toBe('59m')
+  expect(ageLabel(at - 60 * 60000, at)).toBe('1h')
+  expect(ageLabel(at - 23 * 3600000, at)).toBe('23h')
+  expect(ageLabel(at - 49 * 3600000, at)).toBe('2d')
+  expect(ageLabel(0, at)).toBe('')
+})
+
+test('an idle or asked card shows how long it has waited, a busy card does not', () => {
+  const top = (patch: Partial<Card>) => drawn([card({ sessionId: 'a', since: NOW - 12 * 60000, ...patch })], 40, 'me', 0, NOW)[0]
+  const tops = [top({}), top({ asked: true }), top({ status: 'needs-input' }), top({ status: 'running' }), top({ since: 0 })]
+  expect(tops).toEqual([
+    '╭ work/api ────────────────── idle 12m ╮',
+    '╭ work/api ───────────── asked you 12m ╮',
+    '╭ work/api ─────────────── needs input ╮',
+    '╭ work/api ───────────────── ✦ running ╮',
+    '╭ work/api ────────────────────── idle ╮',
+  ])
+  expect(tops.map(t => cellWidth(t ?? ''))).toEqual(tops.map(() => 40))
+})
+
+test('the age starts when the status changes, and a heartbeat keeps it', async ($, on) => {
+  const { own, clock } = harness(on)
+
+  await start($)
+  expect(own().since).toBe(NOW)
+
+  await clock.advance(30000)
+  expect(own()).toMatchObject({ since: NOW, updatedAt: NOW + 30000 })
+
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  expect(own().since).toBe(NOW + 30000)
+
+  await clock.advance(60000)
+  await $.turn.complete({ turnId: 't1', answer: 'Done.', durationMs: 5, isAborted: false, reason: 'answer' })
+  expect(own()).toMatchObject({ status: 'idle', since: NOW + 90000 })
+})
+
+test('a session that starts again over its idle card keeps the age', async ($, on) => {
+  const { own, others } = harness(on)
+  others(card({ sessionId: SID, since: NOW - 600000 }))
+
+  await start($)
+  expect(own().since).toBe(NOW - 600000)
+})
+
+test('a session that starts again over its running card starts the age anew', async ($, on) => {
+  const { own, others } = harness(on)
+  others(card({ sessionId: SID, status: 'running', since: NOW - 600000 }))
+
+  await start($)
+  expect(own()).toMatchObject({ status: 'idle', since: NOW })
 })
 
 test('a running card steps its spinner with the frame and keeps its width', () => {
