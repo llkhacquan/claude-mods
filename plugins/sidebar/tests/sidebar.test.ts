@@ -424,6 +424,19 @@ test('a turn that ends reads idle before git answers, then takes the git counts'
   expect(own()).toMatchObject({ status: 'idle', changed: 2, unpushed: 2 })
 })
 
+test('a card rewritten inside one mtime tick is read again when its size differs', async ($, on) => {
+  const { others, files, wake } = harness(on)
+
+  await start($)
+  await $.command.run(RUN)
+  others(card({ sessionId: 'live', branch: 'main' }))
+  await wake()
+  files.set(`${DIR}/live.json`, JSON.stringify(card({ sessionId: 'live', branch: 'release-2' })))
+  await wake()
+
+  expect(await paneText($)).toContain('🌿 release-2')
+})
+
 test('a tool call beside one that waits for the person keeps the card on needs input', async ($, on) => {
   const { own, hold } = harness(on)
 

@@ -127,7 +127,7 @@ let lateSignal: Timer | null = null
 let purged = new Set<string>()
 let own: Card = freshCard('', '', '')
 let writing: Promise<void> = Promise.resolve()
-let seen = new Map<string, { mtimeMs: number; card: Card }>()
+let seen = new Map<string, { mtimeMs: number; size: number; card: Card }>()
 let shown = ''
 let refreshing: Promise<void> | null = null
 let isRefreshQueued = false
@@ -633,7 +633,7 @@ function refresh($: EngineInterface): Promise<void> {
 async function readCards($: EngineInterface): Promise<void> {
   if (!dir || !(await $.fs.exists(dir))) return
   const now = await $.clock.now()
-  const next = new Map<string, { mtimeMs: number; card: Card }>()
+  const next = new Map<string, { mtimeMs: number; size: number; card: Card }>()
   const expired: string[] = []
   for (const entry of await $.fs.list(dir)) {
     if (entry.kind !== 'file' || !entry.name.endsWith('.json')) continue
@@ -643,12 +643,12 @@ async function readCards($: EngineInterface): Promise<void> {
       continue
     }
     const old = seen.get(entry.name)
-    if (old && old.mtimeMs === entry.mtimeMs) {
+    if (old && old.mtimeMs === entry.mtimeMs && old.size === entry.size) {
       next.set(entry.name, old)
       continue
     }
     const card = await loadCard($, `${dir}/${entry.name}`)
-    if (card) next.set(entry.name, { mtimeMs: entry.mtimeMs, card })
+    if (card) next.set(entry.name, { mtimeMs: entry.mtimeMs, size: entry.size, card })
     else if (old) next.set(entry.name, old)
   }
   seen = next
