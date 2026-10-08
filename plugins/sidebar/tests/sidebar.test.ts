@@ -9,6 +9,7 @@ const NOW = 1000000
 const HEARTBEAT_MS = 30000
 const WAKE_GAP_MS = 100
 const SIGNAL_GAP_MS = 100
+const PURGE_MS = 86400000
 const SPIN_MS = 150
 const GIT_STATUS = [
   '# branch.oid 1f2e3d',
@@ -89,7 +90,7 @@ function harness(on: On, env: Record<string, string> = {}, stored: Record<string
   let writes = 0
   const put = (path: string, text: string) => {
     files.set(path, text)
-    mtimes.set(path, ++writes)
+    mtimes.set(path, clock.now() + ++writes / 1000)
   }
   const held = new Map<string, { reach: () => void; released: Promise<void> }>()
   const hold = (op: 'read' | 'write', path: string) => {
@@ -124,6 +125,7 @@ function harness(on: On, env: Record<string, string> = {}, stored: Record<string
   }))
   on('process.run', ($, e) => {
     ran.push([...e.argv])
+    if (e.argv[0] === 'rm') for (const path of e.argv.slice(3)) files.delete(path)
     const isGit = e.argv[0] === 'git'
     return { value: { exitCode: 0, stdout: isGit ? GIT_STATUS : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -172,7 +174,7 @@ function harness(on: On, env: Record<string, string> = {}, stored: Record<string
     for (const c of list) put(`${DIR}/${c.sessionId}.json`, JSON.stringify(c))
   }
   const tmuxCalls = () => ran.filter(argv => argv[0] === 'tmux')
-  return { clock, files, own, others, tmuxCalls, toasts, opened, store, ran, spawned, wake, pulse, killTail, hold }
+  return { clock, files, mtimes, own, others, tmuxCalls, toasts, opened, store, ran, spawned, wake, pulse, killTail, hold }
 }
 
 async function start($: Engine) {
@@ -432,6 +434,29 @@ test('card changes in a burst send one signal now and one after the gap', async 
 
   await clock.advance(SIGNAL_GAP_MS)
   expect(signals().length).toBe(3)
+})
+
+test('a card file not written for a day is removed, and a fresh one stays', async ($, on) => {
+  const { others, mtimes, files, wake } = harness(on)
+
+  await start($)
+  others(card({ sessionId: 'old' }), card({ sessionId: 'live' }))
+  mtimes.set(`${DIR}/old.json`, NOW - PURGE_MS - 1)
+  await wake()
+
+  expect(files.has(`${DIR}/old.json`)).toBe(false)
+  expect(files.has(`${DIR}/live.json`)).toBe(true)
+})
+
+test('debug mode removes no card file', async ($, on) => {
+  const { others, mtimes, files, wake } = harness(on, { CLAUDE_SIDEBAR_DEBUG: '1' })
+
+  await start($)
+  others(card({ sessionId: 'old' }))
+  mtimes.set(`${DIR}/old.json`, NOW - PURGE_MS - 1)
+  await wake()
+
+  expect(files.has(`${DIR}/old.json`)).toBe(true)
 })
 
 test('with no signal an idle session reads nothing until the heartbeat, which catches the change', async ($, on) => {

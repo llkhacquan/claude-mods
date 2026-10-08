@@ -81,7 +81,7 @@ session C ─┘ on each event + every 30s                        └─► pane
 - A new session empties the `signal` file once it is over 64 KB.
 
 - A card that is not rewritten for 90 seconds is hidden, so a crashed session drops out by itself.
-- A session that ends marks its card `ended`. The files stay; they are a few hundred bytes each.
+- A session that ends marks its card `ended`. Any session removes a card file that was not written for a day, so the feed folder stays small. A session that is resumed within that day gets its title back. Debug mode removes nothing.
 - The feed folder is `$CLAUDE_SIDEBAR_STATE_DIR/feed`, else `$XDG_STATE_HOME/claude-sidebar/feed`, else `~/.local/state/claude-sidebar/feed`.
 
 ## Debug

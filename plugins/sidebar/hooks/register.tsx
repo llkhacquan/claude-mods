@@ -21,6 +21,8 @@ const SIGNAL_TIMEOUT_MS = 3000
 const SIGNAL_MAX_BYTES = 65536
 const WAKE_GAP_MS = 100
 const SIGNAL_GAP_MS = 100
+const PURGE_MS = 86400000
+const PURGE_BATCH = 100
 const SPIN_MS = 150
 const STALE_MS = 90000
 const MINUTE_MS = 60000
@@ -122,6 +124,7 @@ let lastWake = 0
 let lateWake: Timer | null = null
 let lastSignal = 0
 let lateSignal: Timer | null = null
+let purged = new Set<string>()
 let own: Card = freshCard('', '', '')
 let writing: Promise<void> = Promise.resolve()
 let seen = new Map<string, { mtimeMs: number; card: Card }>()
@@ -562,6 +565,14 @@ async function signal($: EngineInterface): Promise<void> {
   })
 }
 
+async function purge($: EngineInterface, paths: string[]): Promise<void> {
+  try {
+    await $.process.run(['rm', '-f', '--', ...paths], { timeoutMs: SIGNAL_TIMEOUT_MS })
+  } catch (err) {
+    $.ui.log(`sidebar: purge failed: ${err}`, { to: 'debug' })
+  }
+}
+
 async function publish($: EngineInterface, patch: Partial<Card>): Promise<void> {
   const updatedAt = await $.clock.now()
   const isNewSession = patch.sessionId !== undefined && patch.sessionId !== own.sessionId
@@ -611,9 +622,16 @@ function refresh($: EngineInterface): Promise<void> {
 
 async function readCards($: EngineInterface): Promise<void> {
   if (!dir || !(await $.fs.exists(dir))) return
+  const now = await $.clock.now()
   const next = new Map<string, { mtimeMs: number; card: Card }>()
+  const expired: string[] = []
   for (const entry of await $.fs.list(dir)) {
     if (entry.kind !== 'file' || !entry.name.endsWith('.json')) continue
+    if (!isDebug && now - entry.mtimeMs > PURGE_MS) {
+      const path = `${dir}/${entry.name}`
+      if (!purged.has(path) && expired.length < PURGE_BATCH) expired.push(path)
+      continue
+    }
     const old = seen.get(entry.name)
     if (old && old.mtimeMs === entry.mtimeMs) {
       next.set(entry.name, old)
@@ -624,7 +642,10 @@ async function readCards($: EngineInterface): Promise<void> {
     else if (old) next.set(entry.name, old)
   }
   seen = next
-  const now = await $.clock.now()
+  if (expired.length > 0) {
+    for (const path of expired) purged.add(path)
+    void purge($, expired)
+  }
   const list = visibleCards([...seen.values()].map(s => s.card), now, isDebug)
   const key = JSON.stringify(list)
   if (key === shown) return
