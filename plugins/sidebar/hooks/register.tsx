@@ -31,7 +31,11 @@ const FILE_TOOLS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit']
 export const SPINNER = ['✦', '✧', '✶', '✷', '✸', '✹', '✺', '✻']
 const RAINBOW = ['#F38BA8', '#FAB387', '#F9E2AF', '#A6E3A1', '#94E2D5', '#89B4FA', '#CBA6F7']
 const COMET_DIM = '#6C7086'
-const COMET_LENGTH = 16
+const PEACH = '#FAB387'
+const GRADIENT_SPEED = 0.035
+const GRADIENT_BLEND = 0.75
+const BORDER_RUNES = '─│╭╮╰╯═║╔╗╚╝'
+const COMET_LENGTH = 10
 const COMET_SWEEP_FRAMES = 20
 const COMET_CYCLE_FRAMES = 40
 const COMET_FAINT = 0.05
@@ -267,7 +271,14 @@ export function cometCell(spin: number, row: number, col: number, height: number
   return { color: blend(COMET_DIM, bright, strength), isBold: strength > COMET_BOLD }
 }
 
-function cometLine(line: Line, row: number, height: number, width: number, spin: number): Line {
+export function gradientColor(spin: number, cell: number, total: number): string {
+  const scaled = ((cell / total + spin * GRADIENT_SPEED) % 1) * RAINBOW.length
+  const at = Math.floor(scaled) % RAINBOW.length
+  const bright = blend(RAINBOW[at] ?? COMET_DIM, RAINBOW[(at + 1) % RAINBOW.length] ?? COMET_DIM, scaled - Math.floor(scaled))
+  return blend(COMET_DIM, bright, GRADIENT_BLEND)
+}
+
+function paintLine(line: Line, row: number, height: number, width: number, spin: number): Line {
   const spans: Span[] = []
   let col = 0
   for (const span of line.spans) {
@@ -278,15 +289,17 @@ function cometLine(line: Line, row: number, height: number, width: number, spin:
     }
     let plain = ''
     for (const ch of span.text) {
+      const cell = perimeterIndex(row, col, height, width)
       const lit = cometCell(spin, row, col, height, width)
+      const flow = cell !== null && BORDER_RUNES.includes(ch) ? gradientColor(spin, cell, 2 * width + 2 * height - 4) : null
       col += cellWidth(ch)
-      if (!lit) {
+      if (!lit && !flow) {
         plain += ch
         continue
       }
       if (plain !== '') spans.push({ ...span, text: plain })
       plain = ''
-      spans.push({ text: ch, color: lit.color, isBold: lit.isBold })
+      spans.push({ text: ch, color: lit?.color ?? flow ?? undefined, isBold: lit?.isBold ?? false })
     }
     if (plain !== '') spans.push({ ...span, text: plain })
   }
@@ -295,7 +308,7 @@ function cometLine(line: Line, row: number, height: number, width: number, spin:
 
 function cardLines(card: Card, width: number, isOwn: boolean, hotkey: string | undefined, spin: number): Line[] {
   const look = statusLook(card)
-  const color: ThemeKey = isOwn ? 'suggestion' : look.color
+  const color: Color = isOwn ? 'suggestion' : card.status === 'running' ? PEACH : look.color
   const border = isOwn ? DOUBLE : ROUND
   const inner = Math.max(0, width - 4)
   const line = (spans: Span[]): Line => ({ sessionId: card.sessionId, spans })
@@ -326,7 +339,7 @@ function cardLines(card: Card, width: number, isOwn: boolean, hotkey: string | u
     ...(needs ? wrapWords(needs, inner, NEEDS_LINES_MAX).map(text => row({ text, color: 'warning' })) : []),
     line([{ text: border.bottomLeft + border.flat.repeat(Math.max(0, width - 2)) + border.bottomRight, color }]),
   ]
-  return card.status === 'running' ? lines.map((l, n) => cometLine(l, n, lines.length, width, spin)) : lines
+  return card.status === 'running' ? lines.map((l, n) => paintLine(l, n, lines.length, width, spin)) : lines
 }
 
 export function renderCards(list: Card[], width: number, ownId: string, spin = 0): Line[] {

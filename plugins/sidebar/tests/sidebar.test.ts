@@ -288,12 +288,15 @@ test('the comet head is the brightest cell, the tail fades, and it rests for hal
   expect(cometCell(40, 0, 0, 6, 40)).toMatchObject({ isBold: true })
 })
 
-test('the comet colors border cells of a running card only and leaves the text as it was', () => {
-  const lit = (list: Card[], spin: number) => renderCards(list, 40, 'me', spin).flatMap(l => l.spans).filter(s => s.color?.startsWith('#'))
+test('a running card flows a gradient over its border lines, with the comet on top, and keeps its text', () => {
+  const lit = (list: Card[], spin: number) => renderCards(list, 40, 'me', spin).flatMap(l => l.spans).filter(s => s.color?.startsWith('#') && [...s.text].length === 1 && s.text !== ' ')
   const running = [card({ sessionId: 'a', status: 'running', tool: 'Bash: ls' })]
-  expect(lit(running, 5).length).toBe(13)
-  expect(lit(running, 5).map(s => cellWidth(s.text))).toEqual(lit(running, 5).map(() => 1))
-  expect(lit(running, 29)).toEqual([])
+  expect(lit(running, 29).length).toBe(72)
+  expect(lit(running, 29).every(s => '─│╭╮╰╯'.includes(s.text) && !s.isBold)).toBe(true)
+  expect(new Set(lit(running, 29).map(s => s.color)).size).toBeGreaterThan(30)
+  expect(lit(running, 29).map(s => s.color)).not.toEqual(lit(running, 30).map(s => s.color))
+  expect(lit(running, 5).filter(s => s.isBold).length).toBe(2)
+  expect(lit(running, 1).filter(s => !'─│╭╮╰╯'.includes(s.text)).length).toBeGreaterThan(0)
   expect(lit([card({ sessionId: 'a' })], 5)).toEqual([])
   expect(lit([card({ sessionId: 'a', status: 'needs-input' })], 5)).toEqual([])
   expect(drawn(running, 40, 'me', 5)).toEqual(drawn(running, 40, 'me', 29))
