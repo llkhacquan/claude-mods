@@ -93,14 +93,14 @@ function harness(on: On, env: Record<string, string> = {}, stored: Record<string
     mtimes.set(path, clock.now() + ++writes / 1000)
   }
   const held = new Map<string, { reach: () => void; released: Promise<void> }>()
-  const hold = (op: 'read' | 'write', path: string) => {
+  const hold = (op: 'read' | 'write' | 'run' | 'call', path: string) => {
     let reach = () => {}
     let release = () => {}
     const reached = new Promise<void>(resolve => (reach = resolve))
     held.set(`${op} ${path}`, { reach, released: new Promise<void>(resolve => (release = resolve)) })
     return { reached, release }
   }
-  const pass = async (op: 'read' | 'write', path: string) => {
+  const pass = async (op: 'read' | 'write' | 'run' | 'call', path: string) => {
     const gate = held.get(`${op} ${path}`)
     if (!gate) return
     held.delete(`${op} ${path}`)
@@ -123,8 +123,9 @@ function harness(on: On, env: Record<string, string> = {}, stored: Record<string
       .filter(p => p.startsWith(`${e.path}/`))
       .map(p => ({ name: p.slice((e.path ?? '').length + 1), kind: 'file' as const, size: files.get(p)!.length, mtimeMs: mtimes.get(p) ?? 0, isLink: false })),
   }))
-  on('process.run', ($, e) => {
+  on('process.run', async ($, e) => {
     ran.push([...e.argv])
+    await pass('run', e.argv[0] ?? '')
     if (e.argv[0] === 'rm') for (const path of e.argv.slice(3)) files.delete(path)
     const isGit = e.argv[0] === 'git'
     return { value: { exitCode: 0, stdout: isGit ? GIT_STATUS : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -167,7 +168,11 @@ function harness(on: On, env: Record<string, string> = {}, stored: Record<string
   on('session.start', () => ({ cwd: '/work/web' }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
-  on('tool.call', () => ({ result: 'ok' }))
+  on('tool.call', async ($, e) => {
+    await pass('call', e.tool)
+    return { result: 'ok' }
+  })
+  on('classic.PermissionRequest', () => ({}))
   on('turn.complete', () => ({ text: '' }))
   const own = () => JSON.parse(files.get(`${DIR}/${SID}.json`) ?? 'null')
   const others = (...list: Card[]) => {
@@ -402,6 +407,21 @@ test('a changed card and a changed mode append to the signal file, a heartbeat d
 
   await clock.advance(SIGNAL_GAP_MS)
   expect(signals().length).toBe(3)
+})
+
+test('a turn that ends reads idle before git answers, then takes the git counts', async ($, on) => {
+  const { own, hold } = harness(on)
+
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  const git = hold('run', 'git')
+  const done = $.turn.complete({ turnId: 't1', answer: 'Done.', durationMs: 5, isAborted: false, reason: 'answer' })
+  await git.reached
+  expect(own().status).toBe('idle')
+
+  git.release()
+  await done
+  expect(own()).toMatchObject({ status: 'idle', changed: 2, unpushed: 2 })
 })
 
 test('a patch that changes nothing writes no card and sends no signal', async ($, on) => {

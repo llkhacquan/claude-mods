@@ -907,13 +907,8 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
     if (e.agentId) return r
-    await publish($, {
-      status: 'idle',
-      asked: !e.isAborted && endsWithQuestion(e.answer),
-      tool: '',
-      recap: [],
-      ...(await readGit($, own.cwd)),
-    })
+    await publish($, { status: 'idle', asked: !e.isAborted && endsWithQuestion(e.answer), tool: '', recap: [] })
+    await publish($, await readGit($, own.cwd))
     if (isInteractive && !e.isAborted && isWorthRecap(turnTools, e.answer)) {
       const seq = ++recapSeq
       void makeRecap($, recapPrompt(lastRequest, e.answer, turnTools, [...turnFiles]), seq).catch(err => {
