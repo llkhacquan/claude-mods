@@ -864,13 +864,15 @@ export const register: Register = on => {
       if (FILE_TOOLS.includes(e.tool) && typeof path === 'string') turnFiles.add(path)
     }
     const blockedBefore = own.status === 'needs-input'
-    if (!e.agentId || !blockedBefore) await publish($, { tool, status: asking ? 'needs-input' : e.agentId ? own.status : 'running' })
+    const isBesideBlocked = blockedBefore && callsInFlight > 0
+    if (!e.agentId || !blockedBefore) await publish($, { tool, status: asking ? 'needs-input' : e.agentId || isBesideBlocked ? own.status : 'running' })
     callsInFlight++
     try {
       return await next(e)
     } finally {
       callsInFlight--
-      if (asking || (own.status === 'needs-input' && !blockedBefore && callsInFlight === 0)) await publish($, { status: 'running' })
+      const isUnblocked = own.status === 'needs-input' && callsInFlight === 0 && (!blockedBefore || isBesideBlocked)
+      if (asking || isUnblocked) await publish($, { status: 'running' })
     }
   })
 

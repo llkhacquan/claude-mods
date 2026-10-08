@@ -424,6 +424,23 @@ test('a turn that ends reads idle before git answers, then takes the git counts'
   expect(own()).toMatchObject({ status: 'idle', changed: 2, unpushed: 2 })
 })
 
+test('a tool call beside one that waits for the person keeps the card on needs input', async ($, on) => {
+  const { own, hold } = harness(on)
+
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  const bash = hold('call', 'Bash')
+  const waiting = $.tool.call({ tool: 'Bash', command: 'rm -rf build' })
+  await bash.reached
+  await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'rm -rf build' } })
+  await $.tool.call({ tool: 'Read', file_path: '/work/web/a.go' })
+  expect(own().status).toBe('needs-input')
+
+  bash.release()
+  await waiting
+  expect(own().status).toBe('running')
+})
+
 test('a patch that changes nothing writes no card and sends no signal', async ($, on) => {
   const { ran, clock, own } = harness(on)
   const signals = () => ran.filter(argv => argv[0] === 'tee')
