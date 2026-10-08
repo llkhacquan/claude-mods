@@ -441,6 +441,18 @@ test('a tool call beside one that waits for the person keeps the card on needs i
   expect(own().status).toBe('running')
 })
 
+test('a session that ends sends its signal before the end returns, inside a burst too', async ($, on) => {
+  const { ran } = harness(on)
+  const signals = () => ran.filter(argv => argv[0] === 'tee')
+
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  const sent = signals().length
+  await $.session.end({ sessionId: SID, reason: 'prompt_input_exit', resume: { id: SID } })
+
+  expect(signals().length).toBe(sent + 1)
+})
+
 test('a session that starts again after it ended is idle again', async ($, on) => {
   const { own } = harness(on)
 

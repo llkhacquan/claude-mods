@@ -565,6 +565,14 @@ async function signal($: EngineInterface): Promise<void> {
   })
 }
 
+async function signalNow($: EngineInterface): Promise<void> {
+  if (!signalPath) return
+  lateSignal?.cancel()
+  lateSignal = null
+  lastSignal = await $.clock.now()
+  await appendSignal($)
+}
+
 async function purge($: EngineInterface, paths: string[]): Promise<void> {
   try {
     await $.process.run(['rm', '-f', '--', ...paths], { timeoutMs: SIGNAL_TIMEOUT_MS })
@@ -573,7 +581,7 @@ async function purge($: EngineInterface, paths: string[]): Promise<void> {
   }
 }
 
-async function publish($: EngineInterface, patch: Partial<Card>): Promise<void> {
+async function publish($: EngineInterface, patch: Partial<Card>, isLast = false): Promise<void> {
   const updatedAt = await $.clock.now()
   const isNewSession = patch.sessionId !== undefined && patch.sessionId !== own.sessionId
   if (own.status === 'ended' && patch.sessionId === undefined) return
@@ -589,7 +597,9 @@ async function publish($: EngineInterface, patch: Partial<Card>): Promise<void> 
     $.ui.log(`sidebar: write failed: ${err}`)
   })
   await writing
-  if (fields.length > 0) void signal($)
+  if (fields.length === 0) return
+  if (isLast) await signalNow($)
+  else void signal($)
 }
 
 async function syncSpinner($: EngineInterface): Promise<void> {
@@ -921,7 +931,7 @@ export const register: Register = on => {
   })
 
   on('session.end', async ($, e, next) => {
-    if (e.sessionId === own.sessionId) await publish($, { status: 'ended', tool: '' })
+    if (e.sessionId === own.sessionId) await publish($, { status: 'ended', tool: '' }, true)
     return next(e)
   })
 
