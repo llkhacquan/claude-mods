@@ -359,6 +359,34 @@ test('the spinner turns while the pane is open and a card runs, and stops otherw
   expect(await paneText($)).toBe(shut)
 })
 
+test('a card that needs input blinks its border, three frames on and three off, and keeps its text', () => {
+  const waiting = [card({ sessionId: 'a', status: 'needs-input' }), card({ sessionId: 'me', status: 'needs-input' })]
+  const corners = (spin: number) => renderCards(waiting, 40, 'me', spin).flatMap(l => l.spans).filter(s => s.text === '╭' || s.text === '╔').map(s => s.color)
+  expect([0, 2, 3, 5, 6].map(corners)).toEqual([
+    ['#FAB387', '#FAB387'],
+    ['#FAB387', '#FAB387'],
+    ['subtle', 'suggestion'],
+    ['subtle', 'suggestion'],
+    ['#FAB387', '#FAB387'],
+  ])
+  expect(drawn(waiting, 40, 'me', 0)).toEqual(drawn(waiting, 40, 'me', 3))
+})
+
+test('the frame timer also runs for a card that needs input', async ($, on) => {
+  const { clock, others } = harness(on)
+  await start($)
+  others(card({ sessionId: 'a', status: 'needs-input' }))
+  await clock.advance(POLL_MS)
+  await $.command.run(RUN)
+
+  const pane = await $.ui.mount(PANE)
+  const colors = async () => (await pane.findAll({ type: 'Text' })).map(t => t.props.color)
+  const on0 = await colors()
+  await clock.advance(SPIN_MS * 3)
+  expect(await colors()).not.toEqual(on0)
+  await pane.unmount()
+})
+
 test('the border cells count clockwise from the top left corner', () => {
   expect(perimeterIndex(0, 0, 5, 10)).toBe(0)
   expect(perimeterIndex(0, 9, 5, 10)).toBe(9)
@@ -390,7 +418,6 @@ test('a running card flows a gradient over its border lines, with the comet on t
   expect(lit(running, 5).filter(s => s.isBold).length).toBe(2)
   expect(lit(running, 1).filter(s => !'─│╭╮╰╯'.includes(s.text)).length).toBeGreaterThan(0)
   expect(lit([card({ sessionId: 'a' })], 5)).toEqual([])
-  expect(lit([card({ sessionId: 'a', status: 'needs-input' })], 5)).toEqual([])
   expect(drawn(running, 40, 'me', 5)).toEqual(drawn(running, 40, 'me', 29))
   expect(renderCards(running, 40, 'me', 5).flatMap(l => l.spans).filter(s => s.hotkey).length).toBe(1)
 })

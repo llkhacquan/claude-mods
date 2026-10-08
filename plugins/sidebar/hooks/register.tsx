@@ -38,6 +38,7 @@ const PEACH = '#FAB387'
 const GRADIENT_SPEED = 0.035
 const GRADIENT_BLEND = 0.75
 const BORDER_RUNES = '─│╭╮╰╯═║╔╗╚╝'
+const BLINK_FRAMES = 3
 const COMET_LENGTH = 10
 const COMET_SWEEP_FRAMES = 20
 const COMET_CYCLE_FRAMES = 40
@@ -112,7 +113,7 @@ let seen = new Map<string, { mtimeMs: number; card: Card }>()
 let shown = ''
 let timers: Timer[] = []
 let spinner: Timer | null = null
-let isAnyRunning = false
+let isAnyAnimated = false
 let titleSeq = 0
 let recapSeq = 0
 let turnTools = 0
@@ -344,7 +345,9 @@ function paintLine(line: Line, row: number, height: number, width: number, spin:
 
 function cardLines(card: Card, width: number, isOwn: boolean, hotkey: string | undefined, spin: number, now: number): Line[] {
   const look = statusLook(card)
-  const color: Color = isOwn ? 'suggestion' : card.status === 'running' ? PEACH : look.color
+  const isBlinkOn = card.status === 'needs-input' && Math.floor(spin / BLINK_FRAMES) % 2 === 0
+  const calm: Color = card.status === 'running' ? PEACH : card.status === 'needs-input' ? 'subtle' : look.color
+  const color: Color = isBlinkOn ? PEACH : isOwn ? 'suggestion' : calm
   const border = isOwn ? DOUBLE : ROUND
   const inner = Math.max(0, width - 4)
   const line = (spans: Span[]): Line => ({ sessionId: card.sessionId, spans })
@@ -518,7 +521,7 @@ async function publish($: EngineInterface, patch: Partial<Card>): Promise<void> 
 
 async function syncSpinner($: EngineInterface): Promise<void> {
   const isPlaced = (await $.ui.panes()).some(p => p.id === PANE && p.isPlaced)
-  if (isPlaced && isAnyRunning) {
+  if (isPlaced && isAnyAnimated) {
     spinner ??= $.clock.every(SPIN_MS, () => void update($, frame, n => (n ?? 0) + 1))
     return
   }
@@ -545,7 +548,7 @@ async function refresh($: EngineInterface): Promise<void> {
   const key = JSON.stringify(list)
   if (key === shown) return
   shown = key
-  isAnyRunning = list.some(c => c.status === 'running')
+  isAnyAnimated = list.some(c => c.status === 'running' || c.status === 'needs-input')
   await update($, cards, () => list)
   await syncSpinner($)
   if (isDebug) await $.fs.write(debugFile(dir), renderCards(list, paneWidth, own.sessionId, 0, now).map(lineText).join('\n') + '\n')

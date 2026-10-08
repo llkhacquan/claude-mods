@@ -40,7 +40,7 @@ Each card shows:
 
 | Line | What |
 |------|------|
-| Top border | The folder with its parent (the folder alone when the border is too narrow), and the status: `running`, `needs input`, `asked you` (it ended its turn with a question), `idle`. An `idle` or `asked you` card adds how long it has waited (`12m`, `3h`, `2d`), from one minute on. A running card has a spinner beside the word a rainbow gradient that flows around its border, and a brighter comet that runs a lap over it, then rests; all three move only while the pane is open |
+| Top border | The folder with its parent (the folder alone when the border is too narrow), and the status: `running`, `needs input`, `asked you` (it ended its turn with a question), `idle`. An `idle` or `asked you` card adds how long it has waited (`12m`, `3h`, `2d`), from one minute on. A running card has a spinner beside the word, a rainbow gradient that flows around its border, and a brighter comet that runs a lap over it, then rests. A `needs input` card blinks its border. All of these move only while the pane is open |
 | Title | A 3-6 word label of what the session is working on |
 | Tool | `⚡` and the current tool while it runs, `▲` and the tool that waits for you |
 | Branch | `🌿` and the git branch, then the count of changed files (untracked ones too) and of commits not pushed to the upstream branch. Read when the session starts, when it changes folder, and at the end of each turn |
