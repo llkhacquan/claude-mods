@@ -32,9 +32,19 @@ Answer `y` to add the marketplace, then pick the user scope so every session loa
 
 ## Use
 
-Type `/sidebar`. In the fullscreen layout the pane docks beside the transcript; on the main screen it opens above the prompt. Close it with `ctrl+x x`, or type `/sidebar` again.
+Type `/sidebar`. In the fullscreen layout the pane docks beside the transcript; on the main screen it opens above the prompt.
 
-The choice is remembered. After `/sidebar`, every new session opens the pane by itself; after a close, new sessions leave it closed. Claude Code places a pane that opens by itself only on a terminal of 110 columns or more. Below that, type `/sidebar`.
+The pane has three states, and every session follows the same one:
+
+| State | What you see | How to get there |
+|-------|--------------|------------------|
+| Open | The pane with the cards | `/sidebar`, or a click on the minimized row |
+| Minimized | One row above the prompt: `[+] sidebar · 3 sessions · 1 needs you` | The `[-]` at the top right of the pane, under the `✕`: click it, or move to it with Tab and press Enter while the pane has the keys |
+| Closed | Nothing | The `✕` of the pane, `ctrl+x x`, or `/sidebar` while the pane is open |
+
+A change in one session reaches the others within two seconds, idle ones too, and a new session starts in the same state.
+
+Claude Code places a pane that opens by itself only on a wide terminal: 144 columns, or 110 once you have opened the pane with `/sidebar` and not closed it by hand since. A narrower session stays without the pane until you type `/sidebar` there.
 
 Each card shows:
 

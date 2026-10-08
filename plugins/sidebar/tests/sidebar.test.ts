@@ -1,6 +1,6 @@
 import { expect, mock, test, type Engine } from 'claude-code/testing'
-import type { On } from 'claude-code'
-import { SPINNER, ageLabel, branchLine, cellWidth, gitState, cometCell, debugFile, feedDir, fit, folderName, jumpKeys, lineText, modelName, perimeterIndex, recapLines, renderCards, statusLook, toCard, usageLine, visibleCards, wrapWords } from '../hooks/register.tsx'
+import type { On, RenderElement } from 'claude-code'
+import { SPINNER, ageLabel, bandLabel, toMode, branchLine, cellWidth, gitState, cometCell, debugFile, feedDir, fit, folderName, jumpKeys, lineText, modelName, perimeterIndex, recapLines, renderCards, statusLook, toCard, usageLine, visibleCards, wrapWords } from '../hooks/register.tsx'
 import type { Card } from '../types'
 
 const SID = 'sess-1'
@@ -24,6 +24,13 @@ const PANE = {
   component: 'Pane',
   requestId: 'sidebar',
   props: { title: 'Sessions', isFocused: true, bodyColumns: 40, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+} as const
+
+const BAND = {
+  plugin: 'sidebar',
+  surface: 'terminal',
+  component: 'AbovePrompt',
+  props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 10 }, view: {} },
 } as const
 
 const RUN = { command: 'sidebar', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } } as const
@@ -54,7 +61,13 @@ function card(patch: Partial<Card>): Card {
 
 function harness(on: On, env: Record<string, string> = {}, stored: Record<string, unknown> = {}) {
   const clock = mock.clock(on, { now: NOW })
-  mock.store(on, stored)
+  const store = new Map(Object.entries(stored))
+  on('store.get', ($, e) => ({ value: store.get(e.key) }))
+  on('store.set', ($, e) => {
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => h($.ui.resolve(e).Text, null, 'below') as RenderElement)
   const opened: { id: string; focus?: boolean }[] = []
   on('ui.open', ($, e) => {
     opened.push({ id: e.id, focus: e.focus })
@@ -108,7 +121,7 @@ function harness(on: On, env: Record<string, string> = {}, stored: Record<string
     for (const c of list) put(`${DIR}/${c.sessionId}.json`, JSON.stringify(c))
   }
   const tmuxCalls = () => ran.filter(argv => argv[0] === 'tmux')
-  return { clock, files, own, others, tmuxCalls, toasts, opened }
+  return { clock, files, own, others, tmuxCalls, toasts, opened, store }
 }
 
 async function start($: Engine) {
@@ -204,26 +217,111 @@ test('debug mode keeps stale cards and dumps the drawn pane to a file', async ($
 })
 
 test('/sidebar opens the pane and a new session opens it again', async ($, on) => {
-  const { opened } = harness(on)
+  const { opened, store } = harness(on)
 
   await start($)
   expect(opened).toEqual([])
-  expect(await $.command.run(RUN)).toMatchObject({ text: 'Sidebar opened.' })
+  expect(await $.command.run(RUN)).toMatchObject({ text: 'Sidebar opened in every session.' })
   expect(opened).toEqual([{ id: 'sidebar', focus: true }])
+  expect(store.get('mode')).toBe('open')
 
+  opened.length = 0
   await start($)
-  expect(opened.at(-1)).toEqual({ id: 'sidebar', focus: undefined })
+  expect(opened).toEqual([{ id: 'sidebar', focus: undefined }])
 })
 
 test('closing the pane keeps it closed in the next session', async ($, on) => {
-  const { opened } = harness(on, {}, { open: true })
+  const { opened, store } = harness(on, {}, { open: true })
 
   await start($)
   expect(opened.length).toBe(1)
-  expect(await $.command.run(RUN)).toMatchObject({ text: 'Sidebar closed.' })
+  expect(await $.command.run(RUN)).toMatchObject({ text: 'Sidebar closed in every session.' })
+  expect(store.get('mode')).toBe('closed')
 
   await start($)
   expect(opened).toEqual([])
+})
+
+test('the stored mode wins over the old open flag, and the flag alone still opens', () => {
+  expect(toMode('min', true)).toBe('min')
+  expect(toMode('closed', true)).toBe('closed')
+  expect(toMode(undefined, true)).toBe('open')
+  expect(toMode(undefined, undefined)).toBe('closed')
+  expect(toMode('wide', false)).toBe('closed')
+})
+
+test('a mode another session stores opens, then closes, the pane at the next poll', async ($, on) => {
+  const { opened, clock, store } = harness(on)
+
+  await start($)
+  store.set('mode', 'open')
+  await clock.advance(POLL_MS)
+  expect(opened).toEqual([{ id: 'sidebar', focus: undefined }])
+
+  store.set('mode', 'min')
+  await clock.advance(POLL_MS)
+  expect(opened).toEqual([])
+  expect(store.get('mode')).toBe('min')
+
+  store.set('mode', 'open')
+  await clock.advance(POLL_MS)
+  store.set('mode', 'closed')
+  await clock.advance(POLL_MS)
+  expect(opened).toEqual([])
+})
+
+test('the minimize button closes the pane and stores min, and the band button brings it back', async ($, on) => {
+  const { opened, others, clock, store } = harness(on, {}, { mode: 'open' })
+
+  await start($)
+  others(card({ sessionId: 'live', status: 'needs-input' }), card({ sessionId: 'asks', asked: true }))
+  await clock.advance(POLL_MS)
+  expect(await (await $.ui.mount(BAND)).find({ type: 'Button' })).toBe(undefined)
+
+  await (await $.ui.mount(PANE)).press({ key: 'minimize' })
+  expect(opened).toEqual([])
+  expect(store.get('mode')).toBe('min')
+
+  const band = await $.ui.mount(BAND)
+  expect((await band.find({ type: 'Button' }))?.props.label).toBe('[+] sidebar · 3 sessions · 2 need you')
+  await band.press({ key: 'restore' })
+  expect(opened).toEqual([{ id: 'sidebar', focus: true }])
+  expect(store.get('mode')).toBe('open')
+})
+
+test('a session that starts while the mode is min shows the band and no pane', async ($, on) => {
+  const { opened } = harness(on, {}, { mode: 'min' })
+
+  await start($)
+
+  expect(opened).toEqual([])
+  expect((await (await $.ui.mount(BAND)).find({ type: 'Button' }))?.props.label).toBe('[+] sidebar · 1 session')
+})
+
+test('the minimized row keeps what the mods below draw in the band', async ($, on) => {
+  harness(on, {}, { mode: 'min' })
+
+  await start($)
+  const band = await $.ui.mount(BAND)
+
+  expect((await band.findAll({ type: 'Text' })).map(t => t.text)).toEqual(['below'])
+  expect((await band.findAll({ type: 'Button' })).length).toBe(1)
+})
+
+test('the band yields to a survey', async ($, on) => {
+  harness(on, {}, { mode: 'min' })
+
+  await start($)
+  const band = await $.ui.mount({ ...BAND, props: { ...BAND.props, hasSurvey: true } })
+
+  expect(await band.find({ type: 'Button' })).toBe(undefined)
+})
+
+test('the band counts the sessions and the ones that wait for the person', () => {
+  expect(bandLabel([card({})])).toBe('[+] sidebar · 1 session')
+  expect(bandLabel([card({}), card({ status: 'running' })])).toBe('[+] sidebar · 2 sessions')
+  expect(bandLabel([card({ status: 'needs-input' }), card({})])).toBe('[+] sidebar · 2 sessions · 1 needs you')
+  expect(bandLabel([card({ status: 'needs-input' }), card({ asked: true }), card({ status: 'running', asked: true })])).toBe('[+] sidebar · 3 sessions · 2 need you')
 })
 
 test('a card draws its folder and status in the top border, at the pane width', () => {
@@ -481,7 +579,7 @@ test('the own card has no jump button', async ($, on) => {
   await clock.advance(POLL_MS)
   const pane = await $.ui.mount(PANE)
 
-  expect(await pane.find({ type: 'Button' })).toBe(undefined)
+  expect((await pane.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual(['[-]'])
 })
 
 test('cards sort by folder then session, so hotkeys stay put', () => {

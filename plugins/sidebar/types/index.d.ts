@@ -1,5 +1,7 @@
 export type Status = 'idle' | 'running' | 'needs-input' | 'ended'
 
+export type Mode = 'open' | 'min' | 'closed'
+
 export type Card = {
   sessionId: string
   paneId: string
@@ -23,6 +25,6 @@ export type Card = {
 
 declare module 'claude-code' {
   interface PluginState {
-    sidebar: { cards: Card[]; frame: number }
+    sidebar: { cards: Card[]; frame: number; mode: Mode }
   }
 }

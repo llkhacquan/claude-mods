@@ -1,12 +1,16 @@
 import { atom, read, update } from 'claude-code'
 import type { Color, EngineInterface, Register, ThemeKey, Timer } from 'claude-code'
 
-import type { Card, Status } from '../types'
+import type { Card, Mode, Status } from '../types'
 
 const PANE = 'sidebar'
 const PANE_COLUMNS = 44
 const PANE_TITLE = 'Sessions'
+const MODE_KEY = 'mode'
 const OPEN_KEY = 'open'
+const MINIMIZE_LABEL = '[-]'
+const MINIMIZE_ELEMENT = 'minimize'
+const RESTORE_ELEMENT = 'restore'
 const NEEDS_LINES_MAX = 2
 const CONTEXT_WARN = 50
 const CONTEXT_FULL = 80
@@ -123,9 +127,22 @@ let callsInFlight = 0
 let isInteractive = true
 let isDebug = false
 let paneWidth = PANE_COLUMNS
+let current: Mode = 'closed'
 
 const cards = atom({ plugin: 'sidebar', key: 'cards' } as const, [])
 const frame = atom({ plugin: 'sidebar', key: 'frame' } as const, 0)
+const mode = atom({ plugin: 'sidebar', key: 'mode' } as const, 'closed')
+
+export function toMode(stored: unknown, wasOpen: unknown): Mode {
+  if (stored === 'open' || stored === 'min' || stored === 'closed') return stored
+  return wasOpen === true ? 'open' : 'closed'
+}
+
+export function bandLabel(list: Card[]): string {
+  const waiting = list.filter(c => c.status === 'needs-input' || (c.status === 'idle' && c.asked)).length
+  const sessions = `${list.length} ${list.length === 1 ? 'session' : 'sessions'}`
+  return waiting > 0 ? `[+] sidebar · ${sessions} · ${waiting} ${waiting === 1 ? 'needs' : 'need'} you` : `[+] sidebar · ${sessions}`
+}
 
 export function feedDir(stateDir: string | undefined, xdgState: string | undefined, home: string | undefined): string {
   if (stateDir) return `${stateDir}/feed`
@@ -554,6 +571,33 @@ async function refresh($: EngineInterface): Promise<void> {
   if (isDebug) await $.fs.write(debugFile(dir), renderCards(list, paneWidth, own.sessionId, 0, now).map(lineText).join('\n') + '\n')
 }
 
+async function storedMode($: EngineInterface): Promise<Mode> {
+  return toMode(await $.store.get(MODE_KEY), await $.store.get(OPEN_KEY))
+}
+
+async function applyMode($: EngineInterface, next: Mode, isAsked = false): Promise<void> {
+  current = next
+  await update($, mode, () => next)
+  const pane = (await $.ui.panes()).find(p => p.id === PANE)
+  if (next === 'open' && (!pane || (isAsked && !pane.isPlaced))) {
+    await refresh($)
+    await $.ui.open({ id: PANE, title: PANE_TITLE, columns: PANE_COLUMNS, ...(isAsked ? { focus: true as const } : {}) })
+  }
+  if (next !== 'open' && pane) await $.ui.close({ id: PANE })
+  await syncSpinner($)
+}
+
+async function setMode($: EngineInterface, next: Mode): Promise<void> {
+  await $.store.set(MODE_KEY, next)
+  await applyMode($, next, next === 'open')
+}
+
+async function poll($: EngineInterface): Promise<void> {
+  const next = await storedMode($)
+  if (next !== current) await applyMode($, next)
+  await refresh($)
+}
+
 async function jump($: EngineInterface, card: Card): Promise<void> {
   if (!card.paneId || !(await $.env.get('TMUX'))) {
     $.ui.toast('sidebar: jump needs both sessions inside tmux')
@@ -605,36 +649,34 @@ export const register: Register = on => {
     timers = [
       $.clock.every(HEARTBEAT_MS, () => void publish($, {})),
       $.clock.every(POLL_MS, () => {
-        void refresh($).catch(err => {
-          $.ui.log(`sidebar: refresh failed: ${err}`, { to: 'debug' })
+        void poll($).catch(err => {
+          $.ui.log(`sidebar: poll failed: ${err}`, { to: 'debug' })
         })
       }),
     ]
-    if ((await $.store.get(OPEN_KEY)) === true) {
-      await refresh($)
-      await $.ui.open({ id: PANE, title: PANE_TITLE, columns: PANE_COLUMNS })
-      await syncSpinner($)
-    }
+    await applyMode($, await storedMode($))
+    if (current !== 'open') await refresh($)
     return r
   })
 
   on('command.run', { command: 'sidebar' }, async $ => {
     if ((await $.ui.panes()).some(p => p.id === PANE && p.isPlaced)) {
-      await $.ui.close({ id: PANE })
-      await syncSpinner($)
-      return { text: 'Sidebar closed.' }
+      await setMode($, 'closed')
+      return { text: 'Sidebar closed in every session.' }
     }
-    await $.store.set(OPEN_KEY, true)
-    await refresh($)
-    await $.ui.open({ id: PANE, title: PANE_TITLE, focus: true, columns: PANE_COLUMNS })
-    await syncSpinner($)
-    return { text: 'Sidebar opened.' }
+    await setMode($, 'open')
+    return { text: 'Sidebar opened in every session.' }
   })
 
   on('ui.close', async ($, e, next) => {
     const r = await next(e)
-    if (e.id === PANE && e.origin.kind !== 'unload') await $.store.set(OPEN_KEY, false)
-    if (e.id === PANE) await syncSpinner($)
+    if (e.id !== PANE) return r
+    if (e.origin.kind === 'person') {
+      await $.store.set(MODE_KEY, 'closed')
+      current = 'closed'
+      await update($, mode, () => 'closed')
+    }
+    await syncSpinner($)
     return r
   })
 
@@ -758,10 +800,13 @@ export const register: Register = on => {
     const now = await $.clock.now()
     const width = e.props.bodyColumns
     paneWidth = width
-    if (list.length === 0) return <Text dimColor>No live sessions.</Text>
     const byId = new Map(list.map(card => [card.sessionId, card]))
     return (
       <Box flexDirection="column" width={width}>
+        <Box flexDirection="row" width={width} justifyContent="flex-end">
+          <Button plain dimColor key={MINIMIZE_ELEMENT} label={MINIMIZE_LABEL} onPress={() => setMode($, 'min')} />
+        </Box>
+        {list.length === 0 ? <Text dimColor>No live sessions.</Text> : null}
         {renderCards(list, width, own.sessionId, spin, now).map(line => (
           <Box flexDirection="row" width={width}>
             {line.spans.map(span => {
@@ -776,6 +821,18 @@ export const register: Register = on => {
             })}
           </Box>
         ))}
+      </Box>
+    )
+  })
+
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.hasSurvey || (await read($, mode)) !== 'min') return next(e)
+    const { Box, Button } = $.ui.resolve(e)
+    const label = fit(bandLabel(await read($, cards)), e.props.bodyColumns)
+    return (
+      <Box flexDirection="column">
+        {await next(e)}
+        <Button plain key={RESTORE_ELEMENT} label={label} onPress={() => setMode($, 'open')} />
       </Box>
     )
   })
