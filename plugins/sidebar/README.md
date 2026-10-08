@@ -3,19 +3,19 @@
 A side pane that shows every live Claude Code session on this machine as a card. No tmux, no daemon, no extra binary: each session writes its own card to a small file, and each pane reads all the cards.
 
 ```
-╭ work/api ──────────────────── ✦ running ╮
+╭ work/api ───────────────────── ✦ running ╮
 │ 1: Fix login redirect loop               │
 │ ⚡ Bash: go test ./auth/...              │
 │ 🌿 fix/login · 3 changed · 1 unpushed    │
 │ 🟢 416k/1M · Opus 5.5 · $2.20            │
 ╰──────────────────────────────────────────╯
-╭ work/web ──────────────── asked you 12m ╮
+╭ work/web ───────────────── asked you 12m ╮
 │ 2: Draft release notes                   │
 │ 🌿 main                                  │
 │ 🟢 36k/200k · Sonnet 5.5 · $0.41         │
 │ Needs: pick the changelog format         │
 ╰──────────────────────────────────────────╯
-╔ ▶ work/docs ══════════════════════ idle ╗
+╔ ▶ work/docs ═══════════════════════ idle ╗
 ║ Rewrite the install guide                ║
 ║ 🌿 main                                  ║
 ║ 🟡 120k/200k · Opus 5.5 · $1.10          ║
