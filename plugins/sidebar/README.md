@@ -6,7 +6,7 @@ A side pane that shows every live Claude Code session on this machine as a card.
 ╭ work/api ──────────────────── ✦ running ╮
 │ 1: Fix login redirect loop               │
 │ ⚡ Bash: go test ./auth/...              │
-│ 🌿 fix/login                             │
+│ 🌿 fix/login · 3 changed · 1 unpushed    │
 │ 🟢 416k/1M · Opus 5.5 · $2.20            │
 ╰──────────────────────────────────────────╯
 ╭ work/web ──────────────── asked you 12m ╮
@@ -43,7 +43,7 @@ Each card shows:
 | Top border | The folder with its parent (the folder alone when the border is too narrow), and the status: `running`, `needs input`, `asked you` (it ended its turn with a question), `idle`. An `idle` or `asked you` card adds how long it has waited (`12m`, `3h`, `2d`), from one minute on. A running card has a spinner beside the word a rainbow gradient that flows around its border, and a brighter comet that runs a lap over it, then rests; all three move only while the pane is open |
 | Title | A 3-6 word label of what the session is working on |
 | Tool | `⚡` and the current tool while it runs, `▲` and the tool that waits for you |
-| Branch | `🌿` and the git branch |
+| Branch | `🌿` and the git branch, then the count of changed files (untracked ones too) and of commits not pushed to the upstream branch. Read when the session starts, when it changes folder, and at the end of each turn |
 | Usage | Context use (`🟢` under 50%, `🟡` under 80%, `🔴` above), model, cost so far |
 | Needs | After a long turn: the one thing it waits for from you, two lines at most |
 
@@ -76,5 +76,5 @@ The title and the recap each use one small Haiku call: a title per prompt you ty
 
 ## Needs
 
-- `git` on `PATH` for the branch name. Without it the branch is left out.
+- `git` on `PATH` for the branch row. Without it the row is left out.
 - `tmux` only for the jump.

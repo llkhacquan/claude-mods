@@ -1,6 +1,6 @@
 import { expect, mock, test, type Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { SPINNER, ageLabel, cellWidth, cometCell, debugFile, feedDir, fit, folderName, jumpKeys, lineText, modelName, perimeterIndex, recapLines, renderCards, statusLook, toCard, usageLine, visibleCards, wrapWords } from '../hooks/register.tsx'
+import { SPINNER, ageLabel, branchLine, cellWidth, gitState, cometCell, debugFile, feedDir, fit, folderName, jumpKeys, lineText, modelName, perimeterIndex, recapLines, renderCards, statusLook, toCard, usageLine, visibleCards, wrapWords } from '../hooks/register.tsx'
 import type { Card } from '../types'
 
 const SID = 'sess-1'
@@ -8,6 +8,15 @@ const DIR = '/state/feed'
 const NOW = 1000000
 const POLL_MS = 2000
 const SPIN_MS = 150
+const GIT_STATUS = [
+  '# branch.oid 1f2e3d',
+  '# branch.head feature/x',
+  '# branch.upstream origin/feature/x',
+  '# branch.ab +2 -0',
+  '1 .M N... 100644 100644 100644 1f2e3d 1f2e3d a.go',
+  '? b.go',
+  '',
+].join('\n')
 
 const PANE = {
   plugin: 'sidebar',
@@ -25,6 +34,8 @@ function card(patch: Partial<Card>): Card {
     paneId: '',
     cwd: '/work/api',
     branch: 'main',
+    changed: null,
+    unpushed: null,
     status: 'idle',
     since: 0,
     asked: false,
@@ -79,7 +90,7 @@ function harness(on: On, env: Record<string, string> = {}, stored: Record<string
   on('process.run', ($, e) => {
     ran.push([...e.argv])
     const isGit = e.argv[0] === 'git'
-    return { value: { exitCode: 0, stdout: isGit ? 'feature/x\n' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    return { value: { exitCode: 0, stdout: isGit ? GIT_STATUS : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('ui.toast', ($, e) => {
     toasts.push(e.text)
@@ -119,7 +130,7 @@ test('a session publishes its card with no tmux, and a turn moves it from idle t
   const { own } = harness(on)
 
   await start($)
-  expect(own()).toMatchObject({ sessionId: SID, paneId: '', cwd: '/work/web', branch: 'feature/x', status: 'idle' })
+  expect(own()).toMatchObject({ sessionId: SID, paneId: '', cwd: '/work/web', branch: 'feature/x', changed: 2, unpushed: 2, status: 'idle' })
 
   await $.turn.start({ text: 'go', turnId: 't1' })
   await $.tool.call({ tool: 'Bash', command: 'go test ./...\necho done' })
@@ -294,6 +305,20 @@ test('a session that starts again over its running card starts the age anew', as
 
   await start($)
   expect(own()).toMatchObject({ status: 'idle', since: NOW })
+})
+
+test('git status gives the branch, the changed files, and the commits not pushed yet', () => {
+  expect(gitState(GIT_STATUS)).toEqual({ branch: 'feature/x', changed: 2, unpushed: 2 })
+  expect(gitState('# branch.oid 1f2e3d\n# branch.head main\n')).toEqual({ branch: 'main', changed: 0, unpushed: null })
+  expect(gitState('# branch.oid 1f2e3d\n# branch.head (detached)\n')).toMatchObject({ branch: 'HEAD' })
+  expect(gitState('# branch.head main\n# branch.ab +0 -3\n')).toMatchObject({ unpushed: 0 })
+})
+
+test('the branch row adds only the git counts above zero', () => {
+  expect(branchLine(card({ changed: 1, unpushed: 5 }))).toBe('🌿 main · 1 changed · 5 unpushed')
+  expect(branchLine(card({ changed: 0, unpushed: 5 }))).toBe('🌿 main · 5 unpushed')
+  expect(branchLine(card({ changed: 3, unpushed: null }))).toBe('🌿 main · 3 changed')
+  expect(branchLine(card({ changed: 0, unpushed: 0 }))).toBe('🌿 main')
 })
 
 test('a running card steps its spinner with the frame and keeps its width', () => {

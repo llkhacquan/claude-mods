@@ -5,6 +5,8 @@ export type Card = {
   paneId: string
   cwd: string
   branch: string
+  changed: number | null
+  unpushed: number | null
   status: Status
   since: number
   asked: boolean

@@ -28,6 +28,8 @@ const RECAP_TAIL = 4000
 const RECAP_REQUEST_MAX = 500
 const RECAP_LINE_MAX = 200
 const NEEDS_PREFIX = 'Needs: '
+const GIT_HEAD = '# branch.head '
+const NO_GIT: GitState = { branch: '', changed: null, unpushed: null }
 const FILE_TOOLS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit']
 export const SPINNER = ['✦', '✧', '✶', '✷', '✸', '✹', '✺', '✻']
 const RAINBOW = ['#F38BA8', '#FAB387', '#F9E2AF', '#A6E3A1', '#94E2D5', '#89B4FA', '#CBA6F7']
@@ -70,7 +72,8 @@ const ZERO_WIDTH = /[\u0300-\u036F\u200B-\u200D\uFE0E\uFE0F]/u
 const WIDE =
   /[\u1100-\u115F\u231A\u231B\u23E9-\u23EC\u23F0\u23F3\u25FD\u25FE\u2614\u2615\u2648-\u2653\u267F\u2693\u26A1\u26AA\u26AB\u26BD\u26BE\u26C4\u26C5\u26CE\u26D4\u26EA\u26F2\u26F3\u26F5\u26FA\u26FD\u2705\u270A\u270B\u2728\u274C\u274E\u2753-\u2755\u2757\u2795-\u2797\u27B0\u27BF\u2B1B\u2B1C\u2B50\u2B55\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6\u{1F300}-\u{1FAFF}\u{20000}-\u{3FFFD}]/u
 
-type Look = { word: string; glyph: string; color: ThemeKey }
+type GitState = Pick<Card, 'branch' | 'changed' | 'unpushed'>
+type Look ={ word: string; glyph: string; color: ThemeKey }
 type Border = { topLeft: string; topRight: string; bottomLeft: string; bottomRight: string; flat: string; wall: string }
 
 export type Span = { text: string; color?: Color; isBold?: boolean; isDim?: boolean; hotkey?: string }
@@ -85,6 +88,8 @@ function freshCard(paneId: string, cwd: string, branch: string): Card {
     paneId,
     cwd,
     branch,
+    changed: null,
+    unpushed: null,
     status: 'idle',
     since: 0,
     asked: false,
@@ -143,6 +148,8 @@ export function toCard(raw: unknown): Card | null {
     paneId: text('paneId'),
     cwd: text('cwd'),
     branch: text('branch'),
+    changed: count('changed'),
+    unpushed: count('unpushed'),
     status,
     since: count('since') ?? 0,
     asked: r['asked'] === true,
@@ -249,6 +256,23 @@ export function usageLine(card: Card): string {
   return [dot + fill, modelName(card.model), cost].filter(p => p !== '').join(' · ')
 }
 
+export function gitState(porcelain: string): GitState {
+  const lines = porcelain.split('\n').filter(l => l !== '')
+  const head = lines.find(l => l.startsWith(GIT_HEAD))?.slice(GIT_HEAD.length).trim() ?? ''
+  const ahead = lines.map(l => /^# branch\.ab \+(\d+) /.exec(l)).find(m => m !== null)
+  return {
+    branch: head === '(detached)' ? 'HEAD' : head,
+    changed: lines.filter(l => !l.startsWith('#')).length,
+    unpushed: ahead ? Number(ahead[1]) : null,
+  }
+}
+
+export function branchLine(card: Card): string {
+  const changed = card.changed ? `${card.changed} changed` : ''
+  const unpushed = card.unpushed ? `${card.unpushed} unpushed` : ''
+  return [`🌿 ${card.branch}`, changed, unpushed].filter(p => p !== '').join(' · ')
+}
+
 export function perimeterIndex(row: number, col: number, height: number, width: number): number | null {
   if (row < 0 || col < 0 || row >= height || col >= width) return null
   if (row === 0) return col
@@ -348,7 +372,7 @@ function cardLines(card: Card, width: number, isOwn: boolean, hotkey: string | u
     ]),
     row(hotkey ? { text: `${hotkey}: ${fit(title, inner - 3)}`, hotkey } : { text: fit(title, inner), isBold: true }),
     ...(isBusy && card.tool ? [row({ text: fit(`${look.glyph} ${card.tool}`, inner), color: look.color })] : []),
-    ...(card.branch ? [row({ text: fit(`🌿 ${card.branch}`, inner), isDim: true })] : []),
+    ...(card.branch ? [row({ text: fit(branchLine(card), inner), isDim: true })] : []),
     ...(usage ? [row({ text: fit(usage, inner), isDim: true })] : []),
     ...(needs ? wrapWords(needs, inner, NEEDS_LINES_MAX).map(text => row({ text, color: 'warning' })) : []),
     line([{ text: border.bottomLeft + border.flat.repeat(Math.max(0, width - 2)) + border.bottomRight, color }]),
@@ -467,12 +491,12 @@ async function savedCard($: EngineInterface, sessionId: string): Promise<Card | 
   return (await $.fs.exists(path)) ? loadCard($, path) : null
 }
 
-async function gitBranch($: EngineInterface, cwd: string): Promise<string> {
+async function readGit($: EngineInterface, cwd: string): Promise<GitState> {
   try {
-    const r = await $.process.run(['git', '-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeoutMs: GIT_TIMEOUT_MS })
-    return r.exitCode === 0 ? r.stdout.trim() : ''
+    const r = await $.process.run(['git', '--no-optional-locks', '-c', 'core.fsmonitor=false', '-C', cwd, 'status', '--porcelain=v2', '--branch'], { timeoutMs: GIT_TIMEOUT_MS })
+    return r.exitCode === 0 ? gitState(r.stdout) : NO_GIT
   } catch {
-    return ''
+    return NO_GIT
   }
 }
 
@@ -482,7 +506,8 @@ async function publish($: EngineInterface, patch: Partial<Card>): Promise<void> 
   if (own.status === 'ended' && !isNewSession) return
   const isNewStatus = patch.status !== undefined && patch.status !== own.status
   const since = isNewSession || isNewStatus || own.since === 0 ? updatedAt : own.since
-  own = { ...(isNewSession ? freshCard(own.paneId, own.cwd, own.branch) : own), since, ...patch, updatedAt }
+  const base = isNewSession ? { ...freshCard(own.paneId, own.cwd, own.branch), changed: own.changed, unpushed: own.unpushed } : own
+  own = { ...base, since, ...patch, updatedAt }
   if (!own.sessionId || !dir) return
   const snapshot = own
   writing = writing.then(() => $.fs.write(`${dir}/${snapshot.sessionId}.json`, JSON.stringify(snapshot) + '\n')).catch(err => {
@@ -565,7 +590,7 @@ export const register: Register = on => {
       sessionId,
       paneId: (await $.env.get('TMUX_PANE')) ?? '',
       cwd: e.cwd,
-      branch: await gitBranch($, e.cwd),
+      ...(await readGit($, e.cwd)),
       status: 'idle',
       model: await $.session.model(),
       title: saved?.title ?? '',
@@ -675,7 +700,7 @@ export const register: Register = on => {
   })
 
   on('classic.CwdChanged', async ($, e, next) => {
-    await publish($, { cwd: e.new_cwd, branch: await gitBranch($, e.new_cwd) })
+    await publish($, { cwd: e.new_cwd, ...(await readGit($, e.new_cwd)) })
     return next(e)
   })
 
@@ -707,7 +732,7 @@ export const register: Register = on => {
       asked: !e.isAborted && endsWithQuestion(e.answer),
       tool: '',
       recap: [],
-      branch: await gitBranch($, own.cwd),
+      ...(await readGit($, own.cwd)),
     })
     if (isInteractive && !e.isAborted && isWorthRecap(turnTools, e.answer)) {
       const seq = ++recapSeq
