@@ -477,6 +477,17 @@ test('a session that starts again after it ended is idle again', async ($, on) =
   expect(own().status).toBe('idle')
 })
 
+test('the session that makes the state folder closes it to other users, later ones leave it', async ($, on) => {
+  const { ran } = harness(on)
+  const closes = () => ran.filter(argv => argv[0] === 'chmod')
+
+  await start($)
+  expect(closes()).toEqual([['chmod', '700', DIR]])
+
+  await start($)
+  expect(closes().length).toBe(1)
+})
+
 test('a patch that changes nothing writes no card and sends no signal', async ($, on) => {
   const { ran, clock, own } = harness(on)
   const signals = () => ran.filter(argv => argv[0] === 'tee')

@@ -83,6 +83,7 @@ session C ─┘ on each event + every 30s                        └─► pane
 - A card that is not rewritten for 90 seconds is hidden, so a crashed session drops out by itself.
 - A session that ends marks its card `ended`. Any session removes a card file that was not written for a day, so the feed folder stays small. A session that is resumed within that day gets its title back. Debug mode removes nothing.
 - The feed folder is `$CLAUDE_SIDEBAR_STATE_DIR/feed`, else `$XDG_STATE_HOME/claude-sidebar/feed`, else `~/.local/state/claude-sidebar/feed`.
+- A card holds the folder, the branch and a short title made from your prompt. The session that creates the feed folder sets it to mode `700`, so other users of the machine can not read the cards. A feed folder made by an older version keeps its mode: run `chmod 700` on it once.
 
 ## Debug
 

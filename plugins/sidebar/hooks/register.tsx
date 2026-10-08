@@ -573,6 +573,14 @@ async function signalNow($: EngineInterface): Promise<void> {
   await appendSignal($)
 }
 
+async function closeFeed($: EngineInterface): Promise<void> {
+  try {
+    await $.process.run(['chmod', '700', dir], { timeoutMs: SIGNAL_TIMEOUT_MS })
+  } catch (err) {
+    $.ui.log(`sidebar: chmod failed: ${err}`, { to: 'debug' })
+  }
+}
+
 async function purge($: EngineInterface, paths: string[]): Promise<void> {
   try {
     await $.process.run(['rm', '-f', '--', ...paths], { timeoutMs: SIGNAL_TIMEOUT_MS })
@@ -783,6 +791,7 @@ export const register: Register = on => {
     isDebug = (await $.env.get('CLAUDE_SIDEBAR_DEBUG')) === '1'
     const sessionId = await $.session.id()
     const saved = sessionId === own.sessionId ? own : await savedCard($, sessionId)
+    const isNewFeed = !(await $.fs.exists(dir))
     await publish($, {
       sessionId,
       paneId: (await $.env.get('TMUX_PANE')) ?? '',
@@ -793,6 +802,7 @@ export const register: Register = on => {
       title: saved?.title ?? '',
       ...(saved?.status === 'idle' && saved.since > 0 ? { since: saved.since } : {}),
     })
+    if (isNewFeed) await closeFeed($)
     for (const timer of timers) timer.cancel()
     spinner?.cancel()
     spinner = null
