@@ -213,8 +213,10 @@ export function wrapWords(text: string, width: number, maxLines: number): string
   return line === '' ? lines : [...lines, fit(line, width)]
 }
 
-export function folderName(cwd: string): string {
-  return cwd.split('/').filter(p => p !== '').pop() ?? ''
+export function folderName(cwd: string, room: number): string {
+  const parts = cwd.split('/').filter(p => p !== '')
+  const withParent = parts.slice(-2).join('/')
+  return cellWidth(withParent) <= room ? withParent : fit(parts[parts.length - 1] ?? '', room)
 }
 
 export function modelName(model: string): string {
@@ -318,7 +320,8 @@ function cardLines(card: Card, width: number, isOwn: boolean, hotkey: string | u
   }
   const word = card.status === 'running' ? ` ${SPINNER[spin % SPINNER.length]} ${look.word} ` : ` ${look.word} `
   const mark = isOwn ? '▶ ' : ''
-  const name = ` ${mark}${fit(folderName(card.cwd) || card.sessionId, width - 5 - cellWidth(mark) - cellWidth(word))} `
+  const room = width - 5 - cellWidth(mark) - cellWidth(word)
+  const name = ` ${mark}${folderName(card.cwd, room) || fit(card.sessionId, room)} `
   const flat = border.flat.repeat(Math.max(0, width - 2 - cellWidth(name) - cellWidth(word)))
   const title = card.title || TITLE_READY
   const needs = card.recap.find(l => l.startsWith(NEEDS_PREFIX))

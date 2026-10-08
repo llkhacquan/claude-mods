@@ -1,6 +1,6 @@
 import { expect, mock, test, type Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { SPINNER, cellWidth, cometCell, debugFile, feedDir, fit, jumpKeys, lineText, modelName, perimeterIndex, recapLines, renderCards, statusLook, toCard, usageLine, visibleCards, wrapWords } from '../hooks/register.tsx'
+import { SPINNER, cellWidth, cometCell, debugFile, feedDir, fit, folderName, jumpKeys, lineText, modelName, perimeterIndex, recapLines, renderCards, statusLook, toCard, usageLine, visibleCards, wrapWords } from '../hooks/register.tsx'
 import type { Card } from '../types'
 
 const SID = 'sess-1'
@@ -188,7 +188,7 @@ test('debug mode keeps stale cards and dumps the drawn pane to a file', async ($
 
   const dump = files.get('/state/debug/pane.txt') ?? ''
   expect(dump).toContain('Old fixture')
-  expect(dump.split('\n')[0]).toBe('╭ api ─────────────────────────────── idle ╮')
+  expect(dump.split('\n')[0]).toBe('╭ work/api ────────────────────────── idle ╮')
 })
 
 test('/sidebar opens the pane and a new session opens it again', async ($, on) => {
@@ -217,7 +217,7 @@ test('closing the pane keeps it closed in the next session', async ($, on) => {
 test('a card draws its folder and status in the top border, at the pane width', () => {
   const lines = drawn([card({ sessionId: 'a', status: 'running', tool: 'Bash: go test ./...', recap: ['Needs: pick the changelog format before the release goes out today', 'Did: x'] })], 40, 'me')
   expect(lines).toEqual([
-    '╭ api ────────────────────── ✦ running ╮',
+    '╭ work/api ───────────────── ✦ running ╮',
     '│ 1: Fix login bug                     │',
     '│ ⚡ Bash: go test ./...               │',
     '│ 🌿 main                              │',
@@ -227,6 +227,15 @@ test('a card draws its folder and status in the top border, at the pane width', 
     '╰──────────────────────────────────────╯',
   ])
   expect(lines.map(cellWidth)).toEqual(lines.map(() => 40))
+})
+
+test('the folder shows with its parent, and alone when the border has no room', () => {
+  expect(folderName('/work/custody/fxi', 20)).toBe('custody/fxi')
+  expect(folderName('/work/custody/fxi', 8)).toBe('fxi')
+  expect(folderName('/work/custody/fxi', 2)).toBe('f…')
+  expect(folderName('/work', 20)).toBe('work')
+  expect(folderName('/', 20)).toBe('')
+  expect(drawn([card({ sessionId: 'a', cwd: '/work/custody/a-long-folder-name' })], 30, 'me')[0]).toBe('╭ a-long-folder-name ── idle ╮')
 })
 
 test('a running card steps its spinner with the frame and keeps its width', () => {
@@ -291,7 +300,7 @@ test('the comet head is the brightest cell, the tail fades, and it rests for hal
 test('a running card flows a gradient over its border lines, with the comet on top, and keeps its text', () => {
   const lit = (list: Card[], spin: number) => renderCards(list, 40, 'me', spin).flatMap(l => l.spans).filter(s => s.color?.startsWith('#') && [...s.text].length === 1 && s.text !== ' ')
   const running = [card({ sessionId: 'a', status: 'running', tool: 'Bash: ls' })]
-  expect(lit(running, 29).length).toBe(72)
+  expect(lit(running, 29).length).toBe(67)
   expect(lit(running, 29).every(s => '─│╭╮╰╯'.includes(s.text) && !s.isBold)).toBe(true)
   expect(new Set(lit(running, 29).map(s => s.color)).size).toBeGreaterThan(30)
   expect(lit(running, 29).map(s => s.color)).not.toEqual(lit(running, 30).map(s => s.color))
@@ -311,7 +320,7 @@ test('a recap keeps the Needs line only, and nothing when the agent asks nothing
 
 test('the own card has a double border and no hotkey, and an empty title reads Ready', () => {
   const lines = drawn([card({ sessionId: 'me', title: '', branch: '', model: '', contextPercent: null, contextTokens: null, costUsd: null })], 30, 'me')
-  expect(lines).toEqual(['╔ ▶ api ═══════════════ idle ╗', '║ Ready                      ║', '╚════════════════════════════╝'])
+  expect(lines).toEqual(['╔ ▶ work/api ══════════ idle ╗', '║ Ready                      ║', '╚════════════════════════════╝'])
 })
 
 test('long text is cut to the cell width, wide glyphs count as two', () => {

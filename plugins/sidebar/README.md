@@ -3,19 +3,19 @@
 A side pane that shows every live Claude Code session on this machine as a card. No tmux, no daemon, no extra binary: each session writes its own card to a small file, and each pane reads all the cards.
 
 ```
-╭ api ───────────────────────── ✦ running ╮
+╭ work/api ──────────────────── ✦ running ╮
 │ 1: Fix login redirect loop               │
 │ ⚡ Bash: go test ./auth/...              │
 │ 🌿 fix/login                             │
 │ 🟢 416k/1M · Opus 5.5 · $2.20            │
 ╰──────────────────────────────────────────╯
-╭ web ───────────────────────── asked you ╮
+╭ work/web ──────────────────── asked you ╮
 │ 2: Draft release notes                   │
 │ 🌿 main                                  │
 │ 🟢 36k/200k · Sonnet 5.5 · $0.41         │
 │ Needs: pick the changelog format         │
 ╰──────────────────────────────────────────╯
-╔ ▶ docs ═══════════════════════════ idle ╗
+╔ ▶ work/docs ══════════════════════ idle ╗
 ║ Rewrite the install guide                ║
 ║ 🌿 main                                  ║
 ║ 🟡 120k/200k · Opus 5.5 · $1.10          ║
@@ -40,7 +40,7 @@ Each card shows:
 
 | Line | What |
 |------|------|
-| Top border | The folder, and the status: `running`, `needs input`, `asked you` (it ended its turn with a question), `idle`. A running card has a spinner beside the word a rainbow gradient that flows around its border, and a brighter comet that runs a lap over it, then rests; all three move only while the pane is open |
+| Top border | The folder with its parent (the folder alone when the border is too narrow), and the status: `running`, `needs input`, `asked you` (it ended its turn with a question), `idle`. A running card has a spinner beside the word a rainbow gradient that flows around its border, and a brighter comet that runs a lap over it, then rests; all three move only while the pane is open |
 | Title | A 3-6 word label of what the session is working on |
 | Tool | `⚡` and the current tool while it runs, `▲` and the tool that waits for you |
 | Branch | `🌿` and the git branch |
