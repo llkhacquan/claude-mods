@@ -1,6 +1,6 @@
 # sidebar: sync between sessions without polling
 
-Status: idea, not started. Nothing here is measured yet.
+Status: built (size 2), 2026-10-08. Results are at the end.
 
 ## Problem
 
@@ -67,3 +67,26 @@ Lean: 2.
 - A session that sits idle for a minute makes no feed or store reads other than the heartbeat.
 - No `tail` process is left after its session ends.
 - Tests cover: a signal piece triggers a refresh; the heartbeat still catches a missed signal.
+
+## Results (2026-10-08, macOS)
+
+| Check | Result |
+|-------|--------|
+| 1. Delay | Bare `/usr/bin/tail`: 6-16 ms from the append to the wake. In a live session: 4.4-5.9 ms from the append to the redraw dump, 5 runs |
+| 1. Which `tail` | GNU `tail` (coreutils, first in `PATH` on the test machine) polls on macOS: 81-975 ms. So the mod runs `/usr/bin/tail` by its full path |
+| 2. `$.fs.write` | Rewrites in place: same inode, new mtime. It can not append, and a rewrite of the same size wakes no `tail`. So the append is `tee -a` through `$.process.run` |
+| 3. Orphans | One `tail` per session after `/clear`, none after the session is killed |
+| 4. Restart | The heartbeat starts `tail` again when the stream has ended. Covered by a test, not seen live |
+| 5. Growth | One byte per signal. A new session empties the file over 64 KB. A wake after the cut was seen live |
+
+Idle cost, 5 sessions, 21 minutes: 0.23 s of CPU and about 350 KB per `tail`. `tail -F` wakes once a
+second to check that the file was not renamed, so it is not fully asleep.
+
+Wakes are batched: the first signal reads at once, later ones inside 100 ms share one read at the
+end of the 100 ms. A lone change still shows in about 5 ms; a change inside a burst in up to 100 ms.
+
+Not seen live: a pane mode change between two sessions (the store is shared with the real
+sessions, so the scratch sessions left it alone). The tests cover it through the same wake.
+
+Left out: a fallback poll while `tail` can not start. Such a session syncs at the 30 second
+heartbeat only.

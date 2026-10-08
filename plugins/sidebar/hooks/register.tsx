@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { Color, EngineInterface, Register, ThemeKey, Timer } from 'claude-code'
+import type { Color, EngineInterface, HookStream, ProcessSpawnChunk, ProcessSpawnResult, Register, ThemeKey, Timer } from 'claude-code'
 
 import type { Card, Mode, Status } from '../types'
 
@@ -15,7 +15,11 @@ const NEEDS_LINES_MAX = 2
 const CONTEXT_WARN = 50
 const CONTEXT_FULL = 80
 const HEARTBEAT_MS = 30000
-const POLL_MS = 2000
+// GNU tail on macOS polls every 1s; /usr/bin/tail wakes by kqueue in 6-16ms
+const TAIL = '/usr/bin/tail'
+const SIGNAL_TIMEOUT_MS = 3000
+const SIGNAL_MAX_BYTES = 65536
+const WAKE_GAP_MS = 100
 const SPIN_MS = 150
 const STALE_MS = 90000
 const MINUTE_MS = 60000
@@ -111,10 +115,16 @@ function freshCard(paneId: string, cwd: string, branch: string): Card {
 }
 
 let dir = ''
+let signalPath = ''
+let watcher: HookStream<ProcessSpawnChunk, ProcessSpawnResult> | null = null
+let lastWake = 0
+let lateWake: Timer | null = null
 let own: Card = freshCard('', '', '')
 let writing: Promise<void> = Promise.resolve()
 let seen = new Map<string, { mtimeMs: number; card: Card }>()
 let shown = ''
+let refreshing: Promise<void> | null = null
+let isRefreshQueued = false
 let timers: Timer[] = []
 let spinner: Timer | null = null
 let isAnyAnimated = false
@@ -152,6 +162,10 @@ export function feedDir(stateDir: string | undefined, xdgState: string | undefin
 
 export function debugFile(feed: string): string {
   return feed.replace(/feed$/, 'debug/pane.txt')
+}
+
+export function signalFile(feed: string): string {
+  return feed.replace(/feed$/, 'signal')
 }
 
 export function toCard(raw: unknown): Card | null {
@@ -520,6 +534,15 @@ async function readGit($: EngineInterface, cwd: string): Promise<GitState> {
   }
 }
 
+async function signal($: EngineInterface): Promise<void> {
+  if (!signalPath) return
+  try {
+    await $.process.run(['tee', '-a', signalPath], { stdin: '\n', timeoutMs: SIGNAL_TIMEOUT_MS })
+  } catch (err) {
+    $.ui.log(`sidebar: signal failed: ${err}`, { to: 'debug' })
+  }
+}
+
 async function publish($: EngineInterface, patch: Partial<Card>): Promise<void> {
   const updatedAt = await $.clock.now()
   const isNewSession = patch.sessionId !== undefined && patch.sessionId !== own.sessionId
@@ -534,6 +557,7 @@ async function publish($: EngineInterface, patch: Partial<Card>): Promise<void> 
     $.ui.log(`sidebar: write failed: ${err}`)
   })
   await writing
+  if (Object.keys(patch).length > 0) void signal($)
 }
 
 async function syncSpinner($: EngineInterface): Promise<void> {
@@ -546,7 +570,25 @@ async function syncSpinner($: EngineInterface): Promise<void> {
   spinner = null
 }
 
-async function refresh($: EngineInterface): Promise<void> {
+function refresh($: EngineInterface): Promise<void> {
+  if (refreshing) {
+    isRefreshQueued = true
+    return refreshing
+  }
+  refreshing = (async () => {
+    try {
+      do {
+        isRefreshQueued = false
+        await readCards($)
+      } while (isRefreshQueued)
+    } finally {
+      refreshing = null
+    }
+  })()
+  return refreshing
+}
+
+async function readCards($: EngineInterface): Promise<void> {
   if (!dir || !(await $.fs.exists(dir))) return
   const next = new Map<string, { mtimeMs: number; card: Card }>()
   for (const entry of await $.fs.list(dir)) {
@@ -558,6 +600,7 @@ async function refresh($: EngineInterface): Promise<void> {
     }
     const card = await loadCard($, `${dir}/${entry.name}`)
     if (card) next.set(entry.name, { mtimeMs: entry.mtimeMs, card })
+    else if (old) next.set(entry.name, old)
   }
   seen = next
   const now = await $.clock.now()
@@ -589,6 +632,7 @@ async function applyMode($: EngineInterface, next: Mode, isAsked = false): Promi
 
 async function setMode($: EngineInterface, next: Mode): Promise<void> {
   await $.store.set(MODE_KEY, next)
+  void signal($)
   await applyMode($, next, next === 'open')
 }
 
@@ -596,6 +640,59 @@ async function poll($: EngineInterface): Promise<void> {
   const next = await storedMode($)
   if (next !== current) await applyMode($, next)
   await refresh($)
+}
+
+async function pollQuietly($: EngineInterface): Promise<void> {
+  try {
+    await poll($)
+  } catch (err) {
+    $.ui.log(`sidebar: poll failed: ${err}`, { to: 'debug' })
+  }
+}
+
+async function onWake($: EngineInterface): Promise<void> {
+  if (lateWake) return
+  const now = await $.clock.now()
+  const wait = lastWake + WAKE_GAP_MS - now
+  if (wait <= 0) {
+    lastWake = now
+    await pollQuietly($)
+    return
+  }
+  lateWake = $.clock.after(wait, () => {
+    lateWake = null
+    lastWake = now + wait
+    void pollQuietly($)
+  })
+}
+
+function watch($: EngineInterface): void {
+  const old = watcher
+  const stream = $.process.spawn({ argv: [TAIL, '-n', '0', '-F', signalPath] })
+  watcher = stream
+  void old?.return({ code: null, signal: null }).catch(() => {})
+  void (async () => {
+    try {
+      for await (const _chunk of stream) await onWake($)
+    } catch (err) {
+      $.ui.log(`sidebar: watch failed: ${err}`, { to: 'debug' })
+    }
+    if (watcher === stream) watcher = null
+  })()
+}
+
+async function restartWatch($: EngineInterface): Promise<void> {
+  const size = (await $.fs.exists(signalPath)) ? (await $.fs.stat(signalPath)).size : null
+  if (size === null || size > SIGNAL_MAX_BYTES) await $.fs.write(signalPath, '')
+  lateWake?.cancel()
+  lateWake = null
+  watch($)
+}
+
+async function beat($: EngineInterface): Promise<void> {
+  await publish($, {})
+  if (!watcher) watch($)
+  await pollQuietly($)
 }
 
 async function jump($: EngineInterface, card: Card): Promise<void> {
@@ -630,6 +727,7 @@ export const register: Register = on => {
     isInteractive = e.isInteractive
     if (!isInteractive) return r
     dir = feedDir(await $.env.get('CLAUDE_SIDEBAR_STATE_DIR'), await $.env.get('XDG_STATE_HOME'), await $.env.get('HOME'))
+    signalPath = signalFile(dir)
     isDebug = (await $.env.get('CLAUDE_SIDEBAR_DEBUG')) === '1'
     const sessionId = await $.session.id()
     const saved = sessionId === own.sessionId ? own : await savedCard($, sessionId)
@@ -646,14 +744,8 @@ export const register: Register = on => {
     for (const timer of timers) timer.cancel()
     spinner?.cancel()
     spinner = null
-    timers = [
-      $.clock.every(HEARTBEAT_MS, () => void publish($, {})),
-      $.clock.every(POLL_MS, () => {
-        void poll($).catch(err => {
-          $.ui.log(`sidebar: poll failed: ${err}`, { to: 'debug' })
-        })
-      }),
-    ]
+    timers = [$.clock.every(HEARTBEAT_MS, () => void beat($))]
+    await restartWatch($)
     await applyMode($, await storedMode($))
     if (current !== 'open') await refresh($)
     return r
@@ -673,6 +765,7 @@ export const register: Register = on => {
     if (e.id !== PANE) return r
     if (e.origin.kind === 'person') {
       await $.store.set(MODE_KEY, 'closed')
+      void signal($)
       current = 'closed'
       await update($, mode, () => 'closed')
     }

@@ -6,7 +6,8 @@ import type { Card } from '../types'
 const SID = 'sess-1'
 const DIR = '/state/feed'
 const NOW = 1000000
-const POLL_MS = 2000
+const HEARTBEAT_MS = 30000
+const WAKE_GAP_MS = 100
 const SPIN_MS = 150
 const GIT_STATUS = [
   '# branch.oid 1f2e3d',
@@ -89,12 +90,32 @@ function harness(on: On, env: Record<string, string> = {}, stored: Record<string
     files.set(path, text)
     mtimes.set(path, ++writes)
   }
-  on('fs.write', ($, e) => {
+  const held = new Map<string, { reach: () => void; released: Promise<void> }>()
+  const hold = (op: 'read' | 'write', path: string) => {
+    let reach = () => {}
+    let release = () => {}
+    const reached = new Promise<void>(resolve => (reach = resolve))
+    held.set(`${op} ${path}`, { reach, released: new Promise<void>(resolve => (release = resolve)) })
+    return { reached, release }
+  }
+  const pass = async (op: 'read' | 'write', path: string) => {
+    const gate = held.get(`${op} ${path}`)
+    if (!gate) return
+    held.delete(`${op} ${path}`)
+    gate.reach()
+    await gate.released
+  }
+  on('fs.write', async ($, e) => {
+    await pass('write', e.path)
     put(e.path, e.text)
     return { value: undefined }
   })
   on('fs.exists', ($, e) => ({ value: files.has(e.path) || [...files.keys()].some(p => p.startsWith(`${e.path}/`)) }))
-  on('fs.read', ($, e) => ({ value: files.get(e.path) ?? '' }))
+  on('fs.read', async ($, e) => {
+    const text = files.get(e.path) ?? ''
+    await pass('read', e.path)
+    return { value: text }
+  })
   on('fs.list', ($, e) => ({
     value: [...files.keys()]
       .filter(p => p.startsWith(`${e.path}/`))
@@ -105,6 +126,35 @@ function harness(on: On, env: Record<string, string> = {}, stored: Record<string
     const isGit = e.argv[0] === 'git'
     return { value: { exitCode: 0, stdout: isGit ? GIT_STATUS : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
+  on('fs.stat', ($, e) => ({ value: { kind: 'file' as const, size: files.get(e.path)?.length ?? 0, mtimeMs: mtimes.get(e.path) ?? 0, isLink: false } }))
+  const spawned: string[][] = []
+  const pending: (() => void)[] = []
+  let notify = () => {}
+  let isTailDead = false
+  on('process.spawn', async function* ($, e) {
+    spawned.push([...e.argv])
+    while (!isTailDead) {
+      while (pending.length === 0 && !isTailDead) await new Promise<void>(resolve => (notify = resolve))
+      const done = pending.shift()
+      if (!done) break
+      yield { stream: 'stdout' as const, text: '\n' }
+      done()
+    }
+    return { value: { code: 1, signal: null } }
+  })
+  const killTail = () => {
+    isTailDead = true
+    notify()
+  }
+  const pulse = () =>
+    new Promise<void>(done => {
+      pending.push(done)
+      notify()
+    })
+  const wake = async () => {
+    await clock.advance(WAKE_GAP_MS)
+    await pulse()
+  }
   on('ui.toast', ($, e) => {
     toasts.push(e.text)
     return { value: undefined }
@@ -121,7 +171,7 @@ function harness(on: On, env: Record<string, string> = {}, stored: Record<string
     for (const c of list) put(`${DIR}/${c.sessionId}.json`, JSON.stringify(c))
   }
   const tmuxCalls = () => ran.filter(argv => argv[0] === 'tmux')
-  return { clock, files, own, others, tmuxCalls, toasts, opened, store }
+  return { clock, files, own, others, tmuxCalls, toasts, opened, store, ran, spawned, wake, pulse, killTail, hold }
 }
 
 async function start($: Engine) {
@@ -173,7 +223,7 @@ test('the heartbeat keeps an idle card fresh, and an ended session stops it', as
 })
 
 test('the pane lists live sessions and hides ended and stale ones', async ($, on) => {
-  const { others, clock } = harness(on)
+  const { others, wake } = harness(on)
 
   await start($)
   others(
@@ -181,7 +231,7 @@ test('the pane lists live sessions and hides ended and stale ones', async ($, on
     card({ sessionId: 'gone', status: 'ended', title: 'Ended one' }),
     card({ sessionId: 'crashed', title: 'Crashed one', updatedAt: NOW - 200000 }),
   )
-  await clock.advance(POLL_MS)
+  await wake()
 
   const text = await paneText($)
   expect(text).toContain('⚡ Edit: /work/api/a.go')
@@ -193,11 +243,11 @@ test('the pane lists live sessions and hides ended and stale ones', async ($, on
 })
 
 test('a card that stops its heartbeat drops out of the pane', async ($, on) => {
-  const { others, clock } = harness(on)
+  const { others, clock, wake } = harness(on)
 
   await start($)
   others(card({ sessionId: 'live', status: 'needs-input' }))
-  await clock.advance(POLL_MS)
+  await wake()
   expect(await paneText($)).toContain('needs input')
 
   await clock.advance(90000)
@@ -205,11 +255,11 @@ test('a card that stops its heartbeat drops out of the pane', async ($, on) => {
 })
 
 test('debug mode keeps stale cards and dumps the drawn pane to a file', async ($, on) => {
-  const { others, clock, files } = harness(on, { CLAUDE_SIDEBAR_DEBUG: '1' })
+  const { others, wake, files } = harness(on, { CLAUDE_SIDEBAR_DEBUG: '1' })
 
   await start($)
   others(card({ sessionId: 'old', title: 'Old fixture', updatedAt: NOW - 200000 }))
-  await clock.advance(POLL_MS)
+  await wake()
 
   const dump = files.get('/state/debug/pane.txt') ?? ''
   expect(dump).toContain('Old fixture')
@@ -250,32 +300,144 @@ test('the stored mode wins over the old open flag, and the flag alone still open
   expect(toMode('wide', false)).toBe('closed')
 })
 
-test('a mode another session stores opens, then closes, the pane at the next poll', async ($, on) => {
-  const { opened, clock, store } = harness(on)
+test('a session follows the signal file with one tail, and a new start replaces it', async ($, on) => {
+  const { spawned } = harness(on)
+
+  await start($)
+  expect(spawned).toEqual([['/usr/bin/tail', '-n', '0', '-F', '/state/signal']])
+
+  await start($)
+  expect(spawned.length).toBe(2)
+})
+
+test('a heartbeat that lands inside a new start leaves one tail for that start', async ($, on) => {
+  const { spawned, clock, hold } = harness(on)
+
+  await start($)
+  const write = hold('write', `${DIR}/${SID}.json`)
+  const again = start($)
+  await write.reached
+  await clock.advance(HEARTBEAT_MS)
+  write.release()
+  await again
+  await clock.advance(0)
+
+  expect(spawned.length).toBe(2)
+})
+
+test('a slow read that overlaps a newer one does not put the old card back', async ($, on) => {
+  const { others, clock, wake, hold } = harness(on)
+
+  await start($)
+  await $.command.run(RUN)
+  others(card({ sessionId: 'live', branch: 'old-branch' }))
+  const read = hold('read', `${DIR}/live.json`)
+  const woken = wake()
+  await read.reached
+  others(card({ sessionId: 'live', branch: 'new-branch' }))
+  await clock.advance(HEARTBEAT_MS)
+  read.release()
+  await woken
+  await clock.advance(0)
+
+  expect(await paneText($)).toContain('🌿 new-branch')
+})
+
+test('signals that come in a burst cost one read now and one read after the gap', async ($, on) => {
+  const { opened, store, clock, pulse } = harness(on)
+
+  await start($)
+  await clock.advance(WAKE_GAP_MS)
+  await pulse()
+  store.set('mode', 'open')
+  await pulse()
+  await pulse()
+  expect(opened).toEqual([])
+
+  await clock.advance(WAKE_GAP_MS)
+  expect(opened).toEqual([{ id: 'sidebar', focus: undefined }])
+})
+
+test('the heartbeat starts the tail again after it died', async ($, on) => {
+  const { spawned, clock, killTail } = harness(on)
+
+  await start($)
+  killTail()
+  await clock.advance(HEARTBEAT_MS)
+
+  expect(spawned.length).toBe(2)
+})
+
+test('a card file caught half written keeps its last good card', async ($, on) => {
+  const { others, files, wake } = harness(on)
+
+  await start($)
+  await $.command.run(RUN)
+  others(card({ sessionId: 'live' }))
+  await wake()
+  files.set(`${DIR}/live.json`, '{"sessionId":"li')
+  await wake()
+
+  expect(await paneText($)).toContain('work/api')
+})
+
+test('a changed card and a changed mode append to the signal file, a heartbeat does not', async ($, on) => {
+  const { ran, clock } = harness(on)
+  const signals = () => ran.filter(argv => argv[0] === 'tee')
+
+  await start($)
+  expect(signals()).toEqual([['tee', '-a', '/state/signal']])
+
+  await clock.advance(HEARTBEAT_MS)
+  expect(signals().length).toBe(1)
+
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  expect(signals().length).toBe(2)
+
+  await $.command.run(RUN)
+  expect(signals().length).toBe(3)
+})
+
+test('with no signal an idle session reads nothing until the heartbeat, which catches the change', async ($, on) => {
+  const { others, clock, store, opened } = harness(on)
+
+  await start($)
+  others(card({ sessionId: 'live' }))
+  store.set('mode', 'open')
+  await clock.advance(HEARTBEAT_MS - 1)
+  expect(opened).toEqual([])
+
+  await clock.advance(1)
+  expect(opened).toEqual([{ id: 'sidebar', focus: undefined }])
+  expect(await paneText($)).toContain('work/api')
+})
+
+test('a mode another session stores opens, then closes, the pane at the next signal', async ($, on) => {
+  const { opened, wake, store } = harness(on)
 
   await start($)
   store.set('mode', 'open')
-  await clock.advance(POLL_MS)
+  await wake()
   expect(opened).toEqual([{ id: 'sidebar', focus: undefined }])
 
   store.set('mode', 'min')
-  await clock.advance(POLL_MS)
+  await wake()
   expect(opened).toEqual([])
   expect(store.get('mode')).toBe('min')
 
   store.set('mode', 'open')
-  await clock.advance(POLL_MS)
+  await wake()
   store.set('mode', 'closed')
-  await clock.advance(POLL_MS)
+  await wake()
   expect(opened).toEqual([])
 })
 
 test('the minimize button closes the pane and stores min, and the band button brings it back', async ($, on) => {
-  const { opened, others, clock, store } = harness(on, {}, { mode: 'open' })
+  const { opened, others, wake, store } = harness(on, {}, { mode: 'open' })
 
   await start($)
   others(card({ sessionId: 'live', status: 'needs-input' }), card({ sessionId: 'asks', asked: true }))
-  await clock.advance(POLL_MS)
+  await wake()
   expect(await (await $.ui.mount(BAND)).find({ type: 'Button' })).toBe(undefined)
 
   await (await $.ui.mount(PANE)).press({ key: 'minimize' })
@@ -429,10 +591,10 @@ test('a running card steps its spinner with the frame and keeps its width', () =
 })
 
 test('the spinner turns while the pane is open and a card runs, and stops otherwise', async ($, on) => {
-  const { clock, others } = harness(on)
+  const { clock, others, wake } = harness(on)
   await start($)
   others(card({ sessionId: 'a', status: 'running' }))
-  await clock.advance(POLL_MS)
+  await wake()
   const closed = await paneText($)
   await clock.advance(SPIN_MS * 3)
   expect(await paneText($)).toBe(closed)
@@ -444,13 +606,13 @@ test('the spinner turns while the pane is open and a card runs, and stops otherw
   expect(second).not.toBe(first)
 
   others(card({ sessionId: 'a', status: 'idle' }))
-  await clock.advance(POLL_MS)
+  await wake()
   const idle = await paneText($)
   await clock.advance(SPIN_MS * 3)
   expect(await paneText($)).toBe(idle)
 
   others(card({ sessionId: 'a', status: 'running' }))
-  await clock.advance(POLL_MS)
+  await wake()
   await $.command.run(RUN)
   const shut = await paneText($)
   await clock.advance(SPIN_MS * 3)
@@ -471,10 +633,10 @@ test('a card that needs input blinks its border, three frames on and three off, 
 })
 
 test('the frame timer also runs for a card that needs input', async ($, on) => {
-  const { clock, others } = harness(on)
+  const { clock, others, wake } = harness(on)
   await start($)
   others(card({ sessionId: 'a', status: 'needs-input' }))
-  await clock.advance(POLL_MS)
+  await wake()
   await $.command.run(RUN)
 
   const pane = await $.ui.mount(PANE)
@@ -546,11 +708,11 @@ test('the model reads as a name and a version', () => {
 })
 
 test('a hotkey jumps through tmux when both sessions are in tmux', async ($, on) => {
-  const { others, clock, tmuxCalls, toasts } = harness(on, { TMUX: '/tmp/tmux-501/default,1,0', TMUX_PANE: '%7' })
+  const { others, wake, tmuxCalls, toasts } = harness(on, { TMUX: '/tmp/tmux-501/default,1,0', TMUX_PANE: '%7' })
 
   await start($)
   others(card({ sessionId: 'live', paneId: '%12' }))
-  await clock.advance(POLL_MS)
+  await wake()
   const pane = await $.ui.mount(PANE)
   await pane.press({ key: 'live' })
 
@@ -559,11 +721,11 @@ test('a hotkey jumps through tmux when both sessions are in tmux', async ($, on)
 })
 
 test('a hotkey outside tmux runs nothing and says why', async ($, on) => {
-  const { others, clock, tmuxCalls, toasts } = harness(on)
+  const { others, wake, tmuxCalls, toasts } = harness(on)
 
   await start($)
   others(card({ sessionId: 'live', paneId: '%12' }), card({ sessionId: 'plain', cwd: '/work/zed' }))
-  await clock.advance(POLL_MS)
+  await wake()
   const pane = await $.ui.mount(PANE)
   await pane.press({ key: 'live' })
   await pane.press({ key: 'plain' })
@@ -573,10 +735,10 @@ test('a hotkey outside tmux runs nothing and says why', async ($, on) => {
 })
 
 test('the own card has no jump button', async ($, on) => {
-  const { clock } = harness(on)
+  const { wake } = harness(on)
 
   await start($)
-  await clock.advance(POLL_MS)
+  await wake()
   const pane = await $.ui.mount(PANE)
 
   expect((await pane.findAll({ type: 'Button' })).map(b => b.props.label)).toEqual(['[-]'])

@@ -42,7 +42,7 @@ The pane has three states, and every session follows the same one:
 | Minimized | One row above the prompt: `[+] sidebar · 3 sessions · 1 needs you` | The `[-]` at the top right of the pane, under the `✕`: click it, or move to it with Tab and press Enter while the pane has the keys |
 | Closed | Nothing | The `✕` of the pane, `ctrl+x x`, or `/sidebar` while the pane is open |
 
-A change in one session reaches the others within two seconds, idle ones too, and a new session starts in the same state.
+A change in one session reaches the others in a few milliseconds, idle ones too, and a new session starts in the same state.
 
 Claude Code places a pane that opens by itself only on a wide terminal: 144 columns, or 110 once you have opened the pane with `/sidebar` and not closed it by hand since. A narrower session stays without the pane until you type `/sidebar` there.
 
@@ -69,8 +69,15 @@ When both sessions run inside tmux, each other card gets a hotkey `1`-`9`. While
 session A ─┐ writes its own card                              ┌─► pane in A
 session B ─┼─► ~/.local/state/claude-sidebar/feed/<id>.json ──┼─► pane in B
 session C ─┘ on each event + every 30s                        └─► pane in C
-                                                    reads all cards every 2s
+     │ then appends one byte                  reads all cards on each wake │
+     └─► ~/.local/state/claude-sidebar/signal ──► tail -F in every session ┘
 ```
+
+- No polling. Each session keeps one `/usr/bin/tail -n 0 -F` on the `signal` file. A session appends one byte after it changes its card or the pane state, the kernel wakes every `tail`, and each session reads the cards and the pane state once. Measured on macOS: about 5 ms from the append to the redraw.
+- Signals in a burst are batched: a session reads at once on the first one, then at most once every 100 ms. So a busy session does not make the idle ones read on each of its tool calls.
+- The path is `/usr/bin/tail` on purpose. GNU `tail` on macOS has no file events and polls once a second.
+- The 30 second heartbeat also reads the cards and the pane state, and starts `tail` again when it has died. So a missed signal costs at most 30 seconds.
+- A new session empties the `signal` file once it is over 64 KB.
 
 - A card that is not rewritten for 90 seconds is hidden, so a crashed session drops out by itself.
 - A session that ends marks its card `ended`. The files stay; they are a few hundred bytes each.
