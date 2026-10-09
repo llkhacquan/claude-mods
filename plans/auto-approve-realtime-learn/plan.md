@@ -21,7 +21,10 @@ only way to stop it today is `/auto-approve add` by hand, or the weekly `/auto-a
 - A global rule from the session. A few approvals in one session are too thin for all projects;
   that stays with `/auto-approve learn`.
 - Learned `ASK:` or `DENY:` rules. An approval teaches an allow, nothing else.
-- Any change to the hard ask and hard allow layers.
+- Any change to the hard ask and hard allow layers. One exception came out of the review: a change
+  to a rules file now always asks (`rulesFileReason`). Without it the agent could write the rule
+  itself, `cp` is a hard-allowed command, and the person's key press on an offer would guard
+  nothing.
 
 ## Before this: the mod must be the gate
 

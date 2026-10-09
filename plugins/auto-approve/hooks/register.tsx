@@ -57,7 +57,11 @@ const PROTECTED_BRANCH = /^(main|master|develop|development|trunk|prod|productio
 const PUSH_ASK_FLAG = /^(-f|--force|--force-with-lease(=.*)?|--force-if-includes|--delete|-d|--all|--mirror|--tags|--follow-tags|--prune|--recurse-submodules(=.*)?|--exec=.*|--receive-pack=.*)$/
 const PUSH_OPAQUE = /^(xargs|GIT_DIR=.*|GIT_WORK_TREE=.*|GIT_COMMON_DIR=.*)$/
 
-export const HARD_ALLOW_TOOLS: readonly string[] = ['Read', 'Glob', 'Grep', 'LSP', 'WebSearch', 'TaskOutput', 'TaskStop']
+const RULES_FILE = /auto-approve-rules\.txt|auto-approve\/rules\.txt/i
+const RULES_DIR = /(^|[^\w.-])\.git(?![\w.-])|\.config\/auto-approve(?![\w-])/i
+const MUTATING_ANYWHERE = /(^|[\s;&|(])(cp|mv|mkdir)\b/
+
+export const HARD_ALLOW_TOOLS: readonly string[] =['Read', 'Glob', 'Grep', 'LSP', 'WebSearch', 'TaskOutput', 'TaskStop']
 
 export const HARD_ALLOW_BASH: readonly (readonly [RegExp, string])[] = [
   [/^git\s+(-C\s+\S+\s+)?(status|log|diff|show|branch(?![^\n]*\s(?:-[dDmMf]|--delete|--move|--force)\b)|stash|tag|checkout|fetch|pull|rev-parse|ls-files|rev-list|show-ref|describe|cat-file|shortlog|blame|remote(?!\s+(add|remove|rm|rename|set-url|set-head|set-branches|prune|update)\b)|config\s+(--get\b|[\w.-]+$))\b/, 'git read-only'],
@@ -189,6 +193,17 @@ export async function hardAskReason(cmd: string, cwd: string, branchOf: BranchOf
   return null
 }
 
+export function rulesFileReason(command: string | null, args: Record<string, unknown>): string | null {
+  if (command === null) {
+    const isAimed = Object.entries(args).some(([key, value]) => /path|file/i.test(key) && typeof value === 'string' && RULES_FILE.test(value))
+    return isAimed ? 'change to a rules file of the gate: always ask' : null
+  }
+  const flat = command.replace(/[\\'"]/g, '')
+  const isCopy = MUTATING_ANYWHERE.test(flat)
+  if (RULES_FILE.test(flat) && (isCopy || hardAllowBash(command) === null)) return 'command names a rules file of the gate: always ask'
+  return RULES_DIR.test(flat) && isCopy ? 'file operation in the folder of a rules file: always ask' : null
+}
+
 export function cleanRules(text: string): string {
   return text.split(LINE_BREAK).map(l => l.replace(HIDDEN_CHARS, ' ').trim()).filter(l => l && !l.startsWith('#')).join('\n')
 }
@@ -311,6 +326,8 @@ export async function decide($: EngineInterface, tool: string, args: Record<stri
   if (HARD_ALLOW_TOOLS.includes(tool) && !SECRET_TOKEN.test(JSON.stringify(args))) return { action: 'allow', decision: 'ALLOW', reason: 'read-only tool', layer: 'hard-allow' }
   const command = tool === 'Bash' && typeof args.command === 'string' ? args.command : null
   const danger = command === null ? null : dangerHint(command)
+  const rulesReason = rulesFileReason(command, args)
+  if (rulesReason) return { action: 'ask', decision: 'ASK', reason: rulesReason, layer: 'hard-ask', danger: danger ?? undefined }
   if (command !== null) {
     const askReason = await hardAskReason(command, cwd, dir => git($, dir, ['symbolic-ref', '--quiet', '--short', 'HEAD']))
     if (askReason) return { action: 'ask', decision: 'ASK', reason: askReason, layer: 'hard-ask', danger: danger ?? undefined }

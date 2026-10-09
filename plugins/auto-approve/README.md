@@ -17,7 +17,11 @@ tool call -> hard ask (regex) -> hard allow (regex) -> haiku reads your rules ->
 - **Hard ask**: always shows the dialog, with no model vote. Covers `gh pr create`,
   `gh release create`, and any `git push` to a protected branch (`main`, `master`, `develop`,
   `prod`, `staging`, `release*`), with a force, delete, mirror or tags flag, or to a target that
-  cannot be resolved. No rule can turn this off.
+  cannot be resolved. Also covers a change to the gate's own rules files: a `Write` or `Edit` aimed
+  at one, a command that names one and is not a plain read, and a `cp`, `mv` or `mkdir` that names
+  `.git` or `~/.config/auto-approve`. This match is on the spelling of the command, so a path
+  built from a variable or reached through a link still goes to the model. No rule can turn this
+  off.
 - **Hard allow**: instant, no model call. Read-only and routine commands such as `git status`,
   `git add`, `git commit`, `go test`, `cargo build`, `ls`, `cat`, `grep`. A command falls out of
   this layer when any part of it redirects to a file, names a secret path, or smuggles an exec.
