@@ -75,6 +75,15 @@ Each log line is one JSON object:
 `ask`. `USER_APPROVED` means the gate asked and the user said yes. An `ASK` with no later `USER_APPROVED`
 for the same `tool` and `input` means the user said no, or the call never ran.
 
+Lines with `"layer":"learn"` are the rule offers of a session: `RULE_OFFERED`, `RULE_SAVED` (with
+`"scope":"session|repo"`), `RULE_DECLINED` and `RULE_DISMISSED` (the offer was closed with no
+answer), each with the `rule` text. A rule saved for a session is gone when that session ends.
+Suggest a rule saved with scope `session` in two or more sessions for the repo or global file. Do
+not suggest a rule the user declined. A dismissed rule says nothing either way.
+
+An `"layer":"llm"` line with `"isJudged":false` is a call the model never judged (a timeout, an
+error, a reply that was not a verdict). Do not read it as the model's opinion of the call.
+
 1. Read every `*.jsonl` in the log dir. Keep entries inside the window.
 2. Group by tool and a normalized command pattern (drop paths, ids, hashes, branch names). Count per
    group: `ALLOW`, `ASK`, `DENY`, `USER_APPROVED`.

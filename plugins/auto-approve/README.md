@@ -46,6 +46,46 @@ Plain text, one rule per line, starting with `ALLOW:`, `ASK:` or `DENY:`.
   repository you clone cannot ship rules that allow its own commands.
 - `XDG_CONFIG_HOME` and `XDG_STATE_HOME` are honored.
 
+## Rule offers in the session
+
+When you approve the same kind of call twice in one session, the mod drafts one `ALLOW:` rule
+(a sonnet call, after the tool has run) and offers it in a band above the prompt:
+
+```
+Save this as a rule? drafted from 2 calls you approved
+ALLOW: kubectl port-forward to the staging namespace
+  kubectl port-forward svc/a 8080 -n staging
+  kubectl port-forward svc/b 9090 -n staging
+s: This session  r: This repo  w: Reword  n: No
+```
+
+The band shows the whole rule and up to three of the calls behind it, so you can check that the
+rule is no wider than what you approved. Press ctrl+x tab or click the band, then the key.
+
+- **This session** keeps the rule in memory until the session ends. No file is written. A session
+  holds at most 30 such rules; the oldest goes first.
+- **This repo** appends the line to the repo rules file. If the file cannot be written, the offer
+  stays open and a toast says so.
+- **Reword** lets you edit the line first. A rule is always one `ALLOW:` line of at most 200
+  characters, with no control or hidden characters.
+- **No** drops it, and the same rule is not offered again in this session. Closing the pane or the
+  question with Esc only puts the offer away: the calls behind it are forgotten, and a rule is
+  offered again only after two more approvals.
+
+Only a call the model itself answered `ASK` feeds a draft. A call that the hard ask layer stopped,
+a destructive command, an oversize command, a call the model answered `DENY`, and a call asked
+because the model timed out or gave no verdict never do. No rule is saved without your key press
+on the full rule text.
+
+The `learn` option picks where the offer shows: `band` (default), `pane`, `ask` or `off`. Set it in
+the config menu, or under `pluginConfigs` in your settings.
+
+- `pane` opens a pane that takes the keys until you answer. The focus starts on **No**, and the
+  save buttons have no hotkey there, so a key typed for the prompt cannot save a rule: move with
+  Tab or the arrows, then Enter. On a terminal too narrow to place the pane, the offer shows in
+  the band.
+- `ask` uses the question dialog, with **No** as the first option. Free text rewords the rule.
+
 ## The /auto-approve skill
 
 ```
@@ -59,7 +99,9 @@ Plain text, one rule per line, starting with `ALLOW:`, `ASK:` or `DENY:`.
 Every decision is logged to `~/.local/state/auto-approve/log/<session-id>.jsonl`, and so is each
 time you approved a call the gate asked about. `/auto-approve learn` reads that history, groups it
 by intent, and suggests rules with the evidence. Nothing is written until you confirm. The mod
-reminds you once at session start when the last review is more than 7 days old.
+reminds you once at session start when the last review is more than 7 days old. The log also holds
+each rule offered, saved or refused in a session, so a rule you keep saving for one session can be
+moved to the repo or global file.
 
 ## Limits
 

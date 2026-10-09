@@ -1,7 +1,17 @@
 {
   "name": "auto-approve",
   "version": "0.1.0",
-  "description": "Answers permission prompts for you: regex layers allow routine tool calls and always ask on pushes to protected branches, and haiku judges the rest against your plain-text rules. Logs every decision so /auto-approve learn can suggest new rules",
+  "description": "Answers permission prompts for you: regex layers allow routine tool calls and always ask on pushes to protected branches, and haiku judges the rest against your plain-text rules. Offers a rule after you approve the same kind of call twice, and logs every decision so /auto-approve learn can suggest more",
   "author": { "name": "llkhacquan" },
-  "license": "MIT"
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "learn": {
+      "type": "string",
+      "title": "Rule offers",
+      "description": "Where the mod offers a rule after you approved the same kind of call twice in a session: a band above the prompt, a pane that takes the keys, the question dialog, or never",
+      "default": "band",
+      "options": ["band", "pane", "ask", "off"]
+    }
+  }
 }
