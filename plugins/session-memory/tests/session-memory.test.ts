@@ -17,11 +17,11 @@ const transcript = (turns: number, tag = 'q') =>
 const opsFor = (text: string) =>
   JSON.stringify({ ops: [{ op: 'new', node: 'be', text, type: 'rule', ref: { lines: ['L1'], by: 'user', stance: 'for', quote: 'about deploys' } }] })
 
-function harness(on: On, opts: { files?: Record<string, string>; mtimes?: Record<string, number>; now?: number; git?: Record<string, string>; modelDown?: boolean } = {}) {
+function harness(on: On, opts: { files?: Record<string, string>; mtimes?: Record<string, number>; now?: number; git?: Record<string, string>; modelDown?: boolean; dirs?: string[] } = {}) {
   const clock = mock.clock(on, { now: opts.now ?? 100 * 24 * 60 * MIN })
   mock.env(on, { HOME })
   const files = new Map<string, string>(Object.entries({ [`${HOME}/.config/session-memory/groups.txt`]: `be ${CWD}\n`, ...opts.files }))
-  const dirs = new Set<string>()
+  const dirs = new Set<string>(opts.dirs)
   const mtimes = opts.mtimes ?? {}
   const store = new Map<string, unknown>()
   const prompts: string[] = []
@@ -29,6 +29,7 @@ function harness(on: On, opts: { files?: Record<string, string>; mtimes?: Record
   const answers: string[] = []
   const tools = new Map<string, string>()
   const git: string[] = []
+  const model: { down: boolean; hold?: Promise<void> } = { down: opts.modelDown ?? false }
   const under = (dir: string) => [...files.keys()].filter(p => p.startsWith(`${dir}/`)).map(p => p.slice(dir.length + 1))
 
   on('session.id', () => ({ value: SID }))
@@ -47,6 +48,7 @@ function harness(on: On, opts: { files?: Record<string, string>; mtimes?: Record
     tools.set(e.name, e.description)
     return { value: { tool: `mcp__session-memory__${e.name}` } }
   })
+  on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('ui.status', ($, e) => {
     statuses.push(e.text)
     return { value: undefined }
@@ -73,9 +75,16 @@ function harness(on: On, opts: { files?: Record<string, string>; mtimes?: Record
   on('process.run', ($, e) => {
     const [cmd, ...args] = e.argv
     let exitCode = 0
+    let stderr = ''
     if (cmd === 'mkdir' && args[0] === '-p') dirs.add(args[1] as string)
-    else if (cmd === 'mkdir') exitCode = dirs.has(args[0] as string) ? 1 : (dirs.add(args[0] as string), 0)
-    else if (cmd === 'rm') dirs.delete(args[1] as string)
+    else if (cmd === 'mkdir') {
+      const dir = args[0] as string
+      if (dirs.has(dir)) [exitCode, stderr] = [1, `mkdir: ${dir}: File exists`]
+      else (dirs.add(dir), (mtimes[dir] = Date.now()))
+    } else if (cmd === 'rm') {
+      dirs.delete(args[1] as string)
+      for (const f of under(args[1] as string)) files.delete(`${args[1]}/${f}`)
+    }
     else if (cmd === 'sh') files.set(args[4] as string, `${files.get(args[4] as string) ?? ''}${args[3]}\n`)
     else if (cmd === 'git') {
       git.push(args[1] as string)
@@ -85,23 +94,25 @@ function harness(on: On, opts: { files?: Record<string, string>; mtimes?: Record
       files.set(args[2] as string, files.get(args[1] as string) ?? '')
       files.delete(args[1] as string)
     }
-    return { value: { exitCode, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    return { value: { exitCode, stdout: '', stderr, isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('process.spawn', async function* ($, e) {
     const from = Number((e.argv[2] as string).slice(1)) - 1
     const text = (files.get(e.argv[3] as string) ?? '').split('\n').slice(from).join('\n')
+    if (text.startsWith('UNREADABLE')) return { value: { code: 1, signal: null } }
     if (text) yield { stream: 'stdout' as const, text }
     return { value: { code: 0, signal: null } }
   })
-  on('model.complete', ($, e) => {
+  on('model.complete', async ($, e) => {
     prompts.push(String(e.prompt))
-    if (opts.modelDown) return { value: { isAnswered: false, reason: 'timeout' } as ModelCompleteResult }
+    await model.hold
+    if (model.down) return { value: { isAnswered: false, reason: 'timeout' } as ModelCompleteResult }
     return { value: { isAnswered: true, text: answers.shift() ?? '{"ops":[]}', usage: USAGE } as ModelCompleteResult }
   })
 
   const events = () => (files.get(`${STATE}/events.jsonl`) ?? '').split('\n').filter(Boolean).map(l => JSON.parse(l))
   const items = (group = 'be') => (files.get(`${STATE}/${group}/items.jsonl`) ?? '').split('\n').filter(Boolean).map(l => JSON.parse(l))
-  return { clock, files, store, prompts, statuses, answers, items, events, tools, git }
+  return { clock, files, store, prompts, statuses, answers, items, events, tools, git, model }
 }
 
 const own = (dir = '-work-api') => `${PROJECTS}/${dir}/${SID}.jsonl`
@@ -209,6 +220,53 @@ test('the sweep stops at a third of dailyCalls and leaves the rest for live runs
   expect(Object.values(h.store.get('usage') as object)).toEqual([{ calls: 2, in: 1800, out: 80, sweep: 1 }])
 })
 
+test('a failing model stops the sweep at the first transcript and gives it up after 3 tries', async ($, on) => {
+  const now = 100 * 24 * 60 * MIN
+  const a = `${PROJECTS}/-work-api/a.jsonl`
+  const b = `${PROJECTS}/-work-api/b.jsonl`
+  const h = harness(on, { now, modelDown: true, files: { [a]: transcript(1, 'a'), [b]: transcript(1, 'b') }, mtimes: { [a]: now - 90 * MIN, [b]: now - 60 * MIN } })
+  for (let i = 1; i <= 3; i++) {
+    await start($)
+    await h.clock.settle()
+    expect(h.prompts).toHaveLength(i)
+  }
+  expect(h.prompts.every(p => p.includes('a 0'))).toBe(true)
+  expect(h.events().filter(e => e.ev === 'sweep').map(e => e.stop)).toEqual(['model', 'model', 'model'])
+  expect(h.events().find(e => e.ev === 'give-up')).toMatchObject({ sid: 'a', group: 'be', fails: 3 })
+  expect(Object.keys(h.store.get('seen') as object)).toEqual(['a'])
+  expect(Object.values(h.store.get('usage') as object)).toEqual([{ calls: 3, in: 0, out: 0, sweep: 3 }])
+  await start($)
+  await h.clock.settle()
+  expect(h.prompts.at(-1)).toContain('b 0')
+})
+
+test('the sweep skips a transcript another session has claimed', async ($, on) => {
+  const now = 100 * 24 * 60 * MIN
+  const a = `${PROJECTS}/-work-api/a.jsonl`
+  const b = `${PROJECTS}/-work-api/b.jsonl`
+  const held = `${STATE}/claims/a`
+  const h = harness(on, { now, dirs: [held], files: { [a]: transcript(1, 'a'), [b]: transcript(1, 'b') }, mtimes: { [a]: now - 90 * MIN, [b]: now - 60 * MIN, [held]: Date.now() } })
+  await start($)
+  await h.clock.settle()
+  expect(h.prompts).toHaveLength(1)
+  expect(h.prompts[0]).toContain('b 0')
+  expect(h.events().find(e => e.ev === 'skip')).toMatchObject({ trigger: 'sweep', sid: 'a', why: 'claimed' })
+  expect(Object.keys(h.store.get('seen') as object)).toEqual(['b'])
+})
+
+test('a transcript that throws is logged with its path and the sweep goes on', async ($, on) => {
+  const now = 100 * 24 * 60 * MIN
+  const a = `${PROJECTS}/-work-api/a.jsonl`
+  const b = `${PROJECTS}/-work-api/b.jsonl`
+  const h = harness(on, { now, files: { [a]: 'UNREADABLE', [b]: transcript(1, 'b') }, mtimes: { [a]: now - 90 * MIN, [b]: now - 60 * MIN } })
+  await start($)
+  await h.clock.settle()
+  expect(h.events().find(e => e.ev === 'fail')).toMatchObject({ trigger: 'sweep', sid: 'a', group: 'be', path: a, error: `tail ${a}: exit 1` })
+  expect(h.prompts).toHaveLength(1)
+  expect(h.prompts[0]).toContain('b 0')
+  expect(h.store.get('fails')).toEqual({ a: 1 })
+})
+
 test('a subagent turn does not arm the idle timer', async ($, on) => {
   const h = harness(on, { files: { [own()]: transcript(3) } })
   await start($)
@@ -302,18 +360,6 @@ test('a headless session is left alone', async ($, on) => {
   await $.session.end({ reason: 'other', sessionId: SID, resume: { id: SID } })
   expect(h.prompts).toHaveLength(0)
   expect(h.store.get('pending')).toBe(undefined)
-})
-
-test('an idle run that made no call does not hold off the next idle run', async ($, on) => {
-  const h = harness(on, { files: { [own()]: transcript(2) } })
-  await start($)
-  await turn($)
-  await h.clock.advance(10 * MIN)
-  expect(h.prompts).toHaveLength(0)
-  h.files.set(own(), transcript(2) + transcript(1, 'third'))
-  await turn($)
-  await h.clock.advance(10 * MIN)
-  expect(h.prompts).toHaveLength(1)
 })
 
 const NEW_REPO = '/work/billing'
@@ -417,4 +463,103 @@ test('past the daily cap an unlisted repo stays other and the next session asks'
   expect(h.files.has(AUTO)).toBe(false)
   expect(h.events().find(e => e.ev === 'skip')).toMatchObject({ trigger: 'autogroup', root: NEW_REPO, why: 'cap' })
   expect(h.events().find(e => e.ev === 'start')).toMatchObject({ group: 'other' })
+})
+
+test('an idle run that made no call does not hold off the next idle run', async ($, on) => {
+  const h = harness(on, { files: { [own()]: transcript(2) } })
+  await start($)
+  await turn($)
+  await h.clock.advance(10 * MIN)
+  expect(h.prompts).toHaveLength(0)
+  h.files.set(own(), transcript(2) + transcript(1, 'third'))
+  await turn($)
+  await h.clock.advance(10 * MIN)
+  expect(h.prompts).toHaveLength(1)
+})
+
+test('/memory-forget hides an item from L0 and the tools', async ($, on) => {
+  const h = harness(on, { files: { [own()]: transcript(3) } })
+  h.answers.push(opsFor('deploys need a human go'))
+  await start($)
+  await turn($)
+  await h.clock.advance(10 * MIN)
+  const forget = async (args: string) => String(((await $.command.run({ command: 'memory-forget', args } as never)) as { text?: string }).text)
+  expect(await forget('i-1')).toContain('Forgot i-1: deploys need a human go')
+  expect(h.items()[0]).toMatchObject({ id: 'i-1', dead: true })
+  expect(h.tools.get('memory_open')).toContain('No items yet.')
+  const search = String(((await $.tool.call({ tool: 'mcp__session-memory__memory_search', query: 'deploys' } as never)) as { result: unknown }).result)
+  expect(search).not.toContain('i-1')
+  expect(await forget('i-1')).toBe('No live item i-1 in group be.')
+  expect(await forget('')).toContain('Usage')
+})
+
+test('/memory-forget waits for the group while autogroup is still asking the model', async ($, on) => {
+  const h = harness(on, { git: { [NEW_REPO]: `${NEW_REPO}/.git` } })
+  let release = () => {}
+  h.model.hold = new Promise(r => (release = r))
+  h.answers.push(JSON.stringify({ action: 'join', group: 'be' }))
+  await start($, true, NEW_REPO)
+  const forget = async (args: string) => String(((await $.command.run({ command: 'memory-forget', args } as never)) as { text?: string }).text)
+  expect(await forget('i-9')).toContain('still finding')
+  release()
+  await h.clock.settle()
+  expect(await forget('i-9')).toBe('No live item i-9 in group be.')
+})
+
+const backfillFixture = (on: On) => {
+  const now = 100 * 24 * 60 * MIN
+  const be = `${PROJECTS}/-work-api/be1.jsonl`
+  const ai = `${PROJECTS}/-work-tools/ai1.jsonl`
+  const other = `${PROJECTS}/-work-misc/other1.jsonl`
+  return harness(on, {
+    now,
+    files: { [`${HOME}/.config/session-memory/groups.txt`]: `be ${CWD}\nai /work/tools\n`, [be]: transcript(1, 'be'), [ai]: transcript(1, 'ai'), [other]: transcript(1, 'other') },
+    mtimes: { [be]: now - 60 * MIN, [ai]: now - 60 * MIN, [other]: now - 60 * MIN },
+  })
+}
+const backfillCmd = async ($: Engine) => String(((await $.command.run({ command: 'memory-backfill', args: '' } as never)) as { text?: string }).text)
+
+test('/memory-backfill mines idle transcripts of every group, other included', { options: { sweepMax: 0 } }, async ($, on) => {
+  const h = backfillFixture(on)
+  await start($)
+  await h.clock.settle()
+  expect(h.prompts).toHaveLength(0)
+  expect(await backfillCmd($)).toContain('backfill started')
+  await h.clock.settle()
+  expect(h.prompts.map(p => p.match(/(be|ai|other) 0/)?.[1]).sort()).toEqual(['ai', 'be', 'other'])
+  expect(h.events().find(e => e.ev === 'backfill')).toMatchObject({ done: { be: 1, ai: 1, other: 1 } })
+})
+
+test('a reply with no ops JSON leaves the transcript for a later sweep', async ($, on) => {
+  const now = 100 * 24 * 60 * MIN
+  const a = `${PROJECTS}/-work-api/a.jsonl`
+  const h = harness(on, { now, files: { [a]: transcript(1, 'a') }, mtimes: { [a]: now - 90 * MIN } })
+  h.answers.push('Nothing here worth keeping.')
+  await start($)
+  await h.clock.settle()
+  expect(h.files.has(`${STATE}/be/processed.jsonl`)).toBe(false)
+  expect(h.events().find(e => e.ev === 'model-error')).toMatchObject({ kind: 'parse', sid: 'a' })
+  await start($)
+  await h.clock.settle()
+  expect(h.files.get(`${STATE}/be/processed.jsonl`)).toBe(`${JSON.stringify({ sid: 'a', from: 0, to: 2 })}\n`)
+})
+
+test('/memory-backfill stops at the first failing model call', { options: { sweepMax: 0 } }, async ($, on) => {
+  const h = backfillFixture(on)
+  await start($)
+  await h.clock.settle()
+  h.model.down = true
+  await backfillCmd($)
+  await h.clock.settle()
+  expect(h.prompts).toHaveLength(1)
+  expect(h.events().find(e => e.ev === 'backfill')).toMatchObject({ done: { be: 0 } })
+})
+
+test('/memory-backfill stops at the sweep share of dailyCalls', { options: { sweepMax: 0, dailyCalls: 6 } }, async ($, on) => {
+  const h = backfillFixture(on)
+  await start($)
+  await backfillCmd($)
+  await h.clock.settle()
+  expect(h.prompts).toHaveLength(2)
+  expect(await backfillCmd($)).toContain('used up')
 })

@@ -24,7 +24,7 @@ skip     ~/code/sandbox
 
 - A root covers its worktrees and sub folders. The longest matching root wins.
 - A session in no listed root goes to group `other`. Group `skip` is never mined, and neither are sessions under `/tmp` or `/var/folders` (the macOS `$TMPDIR`, where test suites run `claude -p`).
-- Headless runs (`claude -p`, the SDK) are never mined.
+- Headless runs (`claude -p`, the SDK) are never mined, including a headless resume of an interactive session.
 
 ### Auto groups
 
@@ -45,6 +45,9 @@ When an interactive session starts in a git repo that no rule covers, one model 
 | `/clear` | mine the ended session now |
 | exit | mark the session pending; the next session in its group mines it |
 | session start | in the background, mine up to 10 idle transcripts of this group that grew since last time, pending ones first |
+| `/memory-backfill` | in the background, the same sweep over every group (`other` too) with no per-run limit, until the day's sweep share is used; run it again on later days to go on |
+
+A sweep or backfill stops at the first failed model call (an error, or a reply with no ops JSON) and leaves that transcript for the next one. After 3 failed sweeps a transcript is given up until it grows again.
 
 Each slice of a transcript goes to the model once. The record of what was mined (`processed.jsonl`) is the cursor, so a resumed or crashed session continues where the last run stopped.
 
@@ -53,7 +56,7 @@ Each slice of a transcript goes to the model once. The record of what was mined 
 | Option | Default | |
 |---|---|---|
 | `model` | `sonnet` | model that extracts and files items |
-| `dailyCalls` | `150` | model calls per day; past it, work waits for the next day. The start sweep gets at most a third; idle, compact and clear runs keep the rest |
+| `dailyCalls` | `150` | model calls per day, failed ones included; past it, work waits for the next day. The start sweep gets at most a third; idle, compact and clear runs keep the rest |
 | `sweepMax` | `10` | transcripts one session start picks up |
 | `autoGroups` | `true` | file unlisted git repos into a group with one model call |
 
@@ -68,7 +71,7 @@ Each slice of a transcript goes to the model once. The record of what was mined 
 
 Secrets (keys, tokens, passwords, private keys, mnemonics) are replaced with `[redacted]` before a slice goes to the model, and again in the text and quotes it sends back.
 
-Writes go to a temp file and `mv` over the old one, under a `mkdir` lock per group, so two sessions in one group never drop each other's items. A group file over 4 MiB is not loaded; the status line says which.
+Writes go to a temp file and `mv` over the old one, under a `mkdir` lock per group, so two sessions in one group never drop each other's items. A lock left by a crash is broken after 60 s, by one waiter at a time. Before each model call and again under the lock, a run skips any range another session already mined, and a sweep claims each transcript (`claims/<sid>`) so two sessions never mine it side by side. A group file over 4 MiB is not loaded; the status line says which.
 
 ## Recall
 
@@ -82,6 +85,8 @@ An interactive session in a group gets three tools:
 
 The `memory_open` description carries the group's top items (this repo first) and its topics, cut to fit the 4096-char tool description limit, so the model sees them without a call. It is registered again after the session's own run changes the group. Items the session has seen this way count as echo when it repeats them, not as new votes.
 
+`/memory-forget <item-id>` hides a wrong item: it is gone from the three tools and the description at once. It is kept on disk, and a later ref from the user (not the agent) brings it back.
+
 ## Debugging
 
 Every run appends one JSON line per event to `~/.local/state/session-memory/events.jsonl` (rotated at 1 MiB, three old files kept). `claude --debug` shows the same lines prefixed `session-memory:`. Each line has `ts`, `by` (the session that ran it) and `ev`:
@@ -90,14 +95,18 @@ Every run appends one JSON line per event to `~/.local/state/session-memory/even
 |---|---|---|
 | `start` | an interactive session starts | `cwd`, `group`, options |
 | `autogroup` | an unlisted repo is filed | `root`, `action`, `group`, `why`, `written` (`written`, `exists`, `busy`), `in`, `out`, `ms`, or `error` |
-| `sweep` | the start sweep ends | `found`, `picked`, `done`, `stop` (`all`, `max`, `cap`) |
+| `sweep` | the start sweep or one backfill group ends | `found`, `picked`, `done`, `stop` (`all`, `max`, `cap`, `model`) |
+| `give-up` | a transcript failed 3 sweeps; skipped until it grows | `sid`, `group`, `fails` |
+| `backfill` | `/memory-backfill` ends | `done` (transcripts per group) |
 | `job` | one transcript is processed | `trigger`, `sid`, `group`, `stop`, `slices`, `calls`, `ms` |
 | `slice` | one model call is filed | `from`, `to`, `turns`, `cands`, `in`, `out`, `ms`, `ops`, `items`, `skipped`, `errors` |
 | `split` | a topic over 30 children is split | `node`, `children` or `error` |
 | `tools` | the memory tools are registered | `l0Chars`, `l0Items` |
 | `recall` | a memory tool is called | `tool`, `arg`, `items`, `chars` |
-| `skip` | a trigger did nothing | `why` (`debounce`, `group skip`, `no transcript`, `cap` for an autogroup call) |
-| `model-error`, `busy`, `lock-stale`, `fail` | something went wrong | the error |
+| `forget` | `/memory-forget` hid an item | `group`, `item` |
+| `skip` | a trigger did nothing | `why` (`debounce`, `group skip`, `no transcript`, `claimed` by another session's sweep, `cap` for an autogroup call) |
+| `model-error` | a model call failed; `kind` is `reconcile`, `split` or `parse` (no ops JSON, `error` holds the reply head) | `kind`, `error` |
+| `busy`, `lock-stale`, `fail` | something went wrong | the error, with `sid`, `group` or `path` when known |
 | `end` | a session ends | `reason` |
 
 ```sh

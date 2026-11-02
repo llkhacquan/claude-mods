@@ -137,7 +137,7 @@ export function parseOps(raw: string, ctx: ReconcileContext): { ops: Op[]; error
   return { ops, errors }
 }
 
-function extractOpList(raw: string): unknown[] | null {
+export function extractOpList(raw: string): unknown[] | null {
   const candidates: string[] = []
   const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/i)
   if (fence?.[1]) candidates.push(fence[1])

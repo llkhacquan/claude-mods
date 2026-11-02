@@ -31,7 +31,8 @@ function harness(records: TranscriptRecord[], opts: { answers?: Completion[]; ca
     complete: async (_s, u) => (prompts.push(u), answers.shift() ?? { text: '{"ops":[]}', inTokens: 10, outTokens: 5 }),
     locked: async fn => (opts.busy ? null : fn()),
     callsLeft: async () => left,
-    spend: async () => void left--,
+    reserve: async () => void left--,
+    spend: async () => undefined,
     event: async (ev, fields) => void events.push({ ev, ...fields }),
   }
   const items = () => (files.get(`${DIR}/items.jsonl`) ?? '').split('\n').filter(Boolean).map(l => JSON.parse(l) as Item)
@@ -94,6 +95,20 @@ describe('processSession', () => {
     expect(h.events).toEqual([{ ev: 'model-error', kind: 'reconcile', sid: 's1', from: 0, to: 6, error: 'api-error 529', ms: undefined }])
   })
 
+  test('a reply with no ops JSON leaves the range unprocessed and still counts the call', async () => {
+    const h = harness(turns(3), { answers: [answer('I could not find anything worth keeping.')], calls: 5 })
+    expect((await processSession(h.deps, job())).stop).toBe('model')
+    expect(h.processed()).toEqual([])
+    expect(h.events).toEqual([{ ev: 'model-error', kind: 'parse', sid: 's1', from: 0, to: 6, error: 'I could not find anything worth keeping.', ms: undefined }])
+    expect(await h.deps.callsLeft()).toBe(4)
+  })
+
+  test('a failed call counts against the calls left', async () => {
+    const h = harness(turns(3), { answers: [{ error: 'timeout' }], calls: 5 })
+    await processSession(h.deps, job())
+    expect(await h.deps.callsLeft()).toBe(4)
+  })
+
   test('no calls left stops before the model', async () => {
     const h = harness(turns(3), { calls: 0 })
     expect((await processSession(h.deps, job())).stop).toBe('cap')
@@ -121,6 +136,33 @@ describe('processSession', () => {
     expect(h.processed()).toEqual([{ sid: 's1', from: 0, to: 6 }])
   })
 
+  test('a headless resume of a mined session is not mined', async () => {
+    const recs = turns(3)
+    const h = harness(recs)
+    await processSession(h.deps, job())
+    recs.push(...turns(2).map(r => (r.type === 'user' ? { ...r, entrypoint: 'sdk-cli' } : r)))
+    expect((await processSession(h.deps, job())).stop).toBe('headless')
+    expect(h.prompts).toHaveLength(1)
+    expect(h.processed()).toEqual([{ sid: 's1', from: 0, to: 6 }, { sid: 's1', from: 6, to: 10 }])
+  })
+
+  test('interactive turns after a headless resume are still mined', async () => {
+    const h = harness([...turns(2).map(r => (r.type === 'user' ? { ...r, entrypoint: 'sdk-cli', message: { role: 'user', content: 'headless ask' } } : r)), ...turns(3)])
+    expect((await processSession(h.deps, job())).stop).toBe('done')
+    expect(h.prompts).toHaveLength(1)
+    expect(h.prompts[0]).toContain('question 2')
+    expect(h.prompts[0]).not.toContain('headless ask')
+    expect(h.processed()).toEqual([{ sid: 's1', from: 0, to: 4 }, { sid: 's1', from: 4, to: 10 }])
+  })
+
+  test('a headless resume in an unmined tail is not mined with the interactive turns', async () => {
+    const h = harness([...turns(3), ...turns(2).map(r => (r.type === 'user' ? { ...r, entrypoint: 'sdk-cli', message: { role: 'user', content: 'headless ask' } } : r))])
+    await processSession(h.deps, job())
+    expect(h.prompts).toHaveLength(1)
+    expect(h.prompts[0]).not.toContain('headless ask')
+    expect(h.processed()[0]).toEqual({ sid: 's1', from: 0, to: 6 })
+  })
+
   test('a long transcript goes in chained slices that cover every record', async () => {
     const recs = Array.from({ length: 12 }, (_, i) => user(`${i} ${'x'.repeat(9_000)}`))
     const h = harness(recs)
@@ -130,6 +172,32 @@ describe('processSession', () => {
     expect(ranges[0].from).toBe(0)
     expect(ranges.at(-1).to).toBe(12)
     for (let i = 1; i < ranges.length; i++) expect(ranges[i].from).toBe(ranges[i - 1].to)
+  })
+
+  test('a range another session mined after this one read the transcript is not sent again', async () => {
+    const h = harness(turns(3))
+    const read = h.deps.readRecords
+    h.deps.readRecords = async from => {
+      h.files.set(`${DIR}/processed.jsonl`, `${JSON.stringify({ sid: 's1', from: 0, to: 6 })}\n`)
+      return read(from)
+    }
+    expect(await processSession(h.deps, job())).toEqual({ stop: 'done', slices: 0, calls: 0, warn: undefined })
+    expect(h.prompts).toHaveLength(0)
+  })
+
+  test('a reply for a range another session mined meanwhile is dropped and the rest is mined', async () => {
+    const h = harness(turns(3), { answers: [answer(newOp('first copy')), answer(newOp('tail rule'))] })
+    const complete = h.deps.complete
+    let first = true
+    h.deps.complete = async (sys, u, max) => {
+      if (first) h.files.set(`${DIR}/processed.jsonl`, `${JSON.stringify({ sid: 's1', from: 0, to: 4 })}\n`)
+      first = false
+      return complete(sys, u, max)
+    }
+    await processSession(h.deps, job())
+    expect(h.items().map(i => i.text)).toEqual(['tail rule'])
+    expect(h.processed()).toEqual([{ sid: 's1', from: 0, to: 4 }, { sid: 's1', from: 4, to: 6 }])
+    expect(h.events.find(e => e.ev === 'slice')).toMatchObject({ from: 0, to: 6, dup: true })
   })
 
   test('an item another session saved during the model call is kept', async () => {

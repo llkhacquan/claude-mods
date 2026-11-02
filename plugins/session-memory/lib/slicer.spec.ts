@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { isHeadless, parseJsonl, redact, sliceRecords, type TranscriptRecord } from './slicer.ts'
+import { entryRun, parseJsonl, redact, sliceRecords, type TranscriptRecord } from './slicer.ts'
 
 const user = (content: TranscriptRecord['message'] extends infer M ? M extends { content?: infer C } ? C : never : never, extra: Partial<TranscriptRecord> = {}): TranscriptRecord => ({ type: 'user', entrypoint: 'cli', message: { role: 'user', content }, ...extra })
 const assistant = (content: unknown[]): TranscriptRecord => ({ type: 'assistant', message: { role: 'assistant', content: content as never } })
@@ -224,9 +224,15 @@ describe('parseJsonl', () => {
   })
 })
 
-describe('isHeadless', () => {
+describe('entryRun', () => {
   test('cli is interactive, other entrypoints are headless', () => {
-    expect(isHeadless([user('x')])).toBe(false)
-    expect(isHeadless([user('x', { entrypoint: 'sdk-cli' })])).toBe(true)
+    expect(entryRun([user('x')])).toEqual({ headless: false, end: 1 })
+    expect(entryRun([user('x', { entrypoint: 'sdk-cli' })])).toEqual({ headless: true, end: 1 })
+  })
+
+  test('the run ends at the first user record of the other kind', () => {
+    const recs = [user('a'), { type: 'assistant' }, user('b', { entrypoint: 'sdk-cli' }), user('c')]
+    expect(entryRun(recs)).toEqual({ headless: false, end: 2 })
+    expect(entryRun(recs.slice(2))).toEqual({ headless: true, end: 1 })
   })
 })

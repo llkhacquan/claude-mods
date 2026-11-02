@@ -1,6 +1,6 @@
 import type { Item, Ref } from './memory-types.ts'
-import { buildPrompt, parseOps } from './reconcile-prompt.ts'
-import { isHeadless, sliceRecords, type TranscriptRecord } from './slicer.ts'
+import { buildPrompt, extractOpList, parseOps } from './reconcile-prompt.ts'
+import { entryRun, sliceRecords, type TranscriptRecord } from './slicer.ts'
 import { buildSplitPrompt, parseSplit } from './split-prompt.ts'
 import { applyOps, applySplit, type ApplyResult, canSplit, loadGroup, nodesOver, saveGroup, splitInput, type GroupState, type Processed, type StoreIO } from './store.ts'
 
@@ -15,6 +15,7 @@ export type WorkerDeps = {
   complete(system: string, user: string, maxTokens: number): Promise<Completion>
   locked<T>(fn: () => Promise<T>): Promise<T | null>
   callsLeft(): Promise<number>
+  reserve(): Promise<void>
   spend(c: { inTokens: number; outTokens: number }): Promise<void>
   event(ev: string, fields: Record<string, unknown>): Promise<void>
 }
@@ -32,6 +33,7 @@ export const MIN_HUMAN_TURNS = 3
 export const CANDIDATES = 30
 export const RECONCILE_TOKENS = 8_000
 export const SPLIT_TOKENS = 4_000
+const PARSE_ERROR_CHARS = 200
 
 const GROUP_FILES = ['items.jsonl', 'nodes.json', 'processed.jsonl']
 
@@ -80,39 +82,50 @@ export async function processSession(deps: WorkerDeps, job: Job): Promise<Outcom
   const records = await deps.readRecords(from)
   if (!records.length) return out
 
-  const save = async (slice: Processed, apply?: (s: GroupState) => { state: GroupState; newRefs: Ref[] }) => {
+  const save = async (slice: Processed, apply?: (s: GroupState) => { state: GroupState; newRefs: Ref[] }): Promise<'saved' | 'dup' | 'busy'> => {
     const r = await deps.locked(async () => {
       const fresh = await loadGroup(deps.io, job.dir)
-      if (fresh.processed.some(p => p.sid === slice.sid && p.from <= slice.from && slice.to <= p.to)) return fresh
+      if (fresh.processed.some(p => p.sid === slice.sid && p.from < slice.to && slice.from < p.to)) return { state: fresh, dup: true }
       const applied = apply ? apply(fresh) : { state: fresh, newRefs: [] }
       await saveGroup(deps.io, job.dir, applied.state, applied.newRefs, slice)
-      return { ...applied.state, processed: [...applied.state.processed, slice] }
+      return { state: { ...applied.state, processed: [...applied.state.processed, slice] }, dup: false }
     })
     if (r === null) {
       await deps.event('busy', { sid: slice.sid, from: slice.from, to: slice.to })
-      return false
+      return 'busy'
     }
-    state = r
-    return true
+    state = r.state
+    return r.dup ? 'dup' : 'saved'
   }
 
-  if (from === 0 && isHeadless(records)) {
-    if (!(await save({ sid: job.sid, from: 0, to: records.length }))) return { ...out, stop: 'busy' }
-    return { ...out, stop: 'headless' }
+  const run = entryRun(records)
+  if (run.headless) {
+    if ((await save({ sid: job.sid, from, to: from + run.end })) === 'busy') return { ...out, stop: 'busy' }
+    return run.end < records.length ? processSession(deps, job) : { ...out, stop: 'headless' }
   }
 
+  const ownRun = records.slice(0, run.end)
   let pos = 0
-  while (pos < records.length) {
-    const s = sliceRecords(records, pos, SLICE_CHARS)
+  while (pos < ownRun.length) {
+    const s = sliceRecords(ownRun, pos, SLICE_CHARS)
     const slice: Processed = { sid: job.sid, from: from + pos, to: from + s.toIndex }
     const atEnd = s.toIndex >= records.length
     if (job.trigger === 'idle' && atEnd && s.humanTurns < MIN_HUMAN_TURNS) return { ...out, stop: 'wait' }
+    let saved: 'saved' | 'dup' | 'busy'
 
     if (s.lines.length) {
       if ((await deps.callsLeft()) <= 0) return { ...out, stop: 'cap' }
+      const latest = await loadGroup(deps.io, job.dir)
+      const minedTo = cursorOf(latest, job.sid) - from
+      state = latest
+      if (minedTo > pos) {
+        pos = minedTo
+        continue
+      }
       const text = s.lines.map((l, i) => `[L${i + 1}] ${l}`).join('\n')
       const ctx = { group: job.group, repo: job.repo, nodes: state.nodes, candidates: candidatesFor(text, state.items.values()), loaded: job.loaded }
       const { system, user } = buildPrompt(text, ctx)
+      await deps.reserve()
       const res = await deps.complete(system, user, RECONCILE_TOKENS)
       out.calls++
       if ('error' in res) {
@@ -120,10 +133,14 @@ export async function processSession(deps: WorkerDeps, job: Job): Promise<Outcom
         return { ...out, stop: 'model' }
       }
       await deps.spend(res)
+      if (!extractOpList(res.text)) {
+        await deps.event('model-error', { kind: 'parse', sid: job.sid, from: slice.from, to: slice.to, error: res.text.slice(0, PARSE_ERROR_CHARS), ms: res.ms })
+        return { ...out, stop: 'model' }
+      }
       const { ops, errors } = parseOps(res.text, ctx)
       const box: { applied?: ApplyResult } = {}
-      const ok = await save(slice, fresh => (box.applied = applyOps(fresh, ops, { sid: job.sid, date: job.date })))
-      if (!ok) return { ...out, stop: 'busy' }
+      saved = await save(slice, fresh => (box.applied = applyOps(fresh, ops, { sid: job.sid, date: job.date })))
+      if (saved === 'busy') return { ...out, stop: 'busy' }
       await deps.event('slice', {
         sid: job.sid,
         from: slice.from,
@@ -139,11 +156,11 @@ export async function processSession(deps: WorkerDeps, job: Job): Promise<Outcom
         errors,
         ...(box.applied ? {} : { dup: true }),
       })
-    } else if (!(await save(slice))) {
+    } else if ((saved = await save(slice)) === 'busy') {
       return { ...out, stop: 'busy' }
     }
     out.slices++
-    pos = s.toIndex
+    pos = saved === 'dup' ? cursorOf(state, job.sid) - from : s.toIndex
   }
 
   out.calls += await splitOver(deps, job, state)
@@ -155,6 +172,7 @@ async function splitOver(deps: WorkerDeps, job: Job, state: GroupState): Promise
   for (const node of nodesOver(state)) {
     if (!canSplit(state, node) || (await deps.callsLeft()) <= 0) continue
     const { system, user } = buildSplitPrompt(splitInput(state, node))
+    await deps.reserve()
     const res = await deps.complete(system, user, SPLIT_TOKENS)
     calls++
     if ('error' in res) {

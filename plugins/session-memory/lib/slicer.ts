@@ -167,9 +167,15 @@ export function parseJsonl(raw: string): TranscriptRecord[] {
   return out
 }
 
-export function isHeadless(records: TranscriptRecord[]): boolean {
-  const entry = records.find(r => r.type === 'user' && r.entrypoint)?.entrypoint
-  return entry !== undefined && entry !== 'cli'
+export function entryRun(records: TranscriptRecord[]): { headless: boolean; end: number } {
+  let headless: boolean | undefined
+  for (let i = 0; i < records.length; i++) {
+    const entry = records[i]!.type === 'user' ? records[i]!.entrypoint : undefined
+    if (entry === undefined) continue
+    if (headless === undefined) headless = entry !== 'cli'
+    else if (headless !== (entry !== 'cli')) return { headless, end: i }
+  }
+  return { headless: headless ?? false, end: records.length }
 }
 
 function humanText(text: string, human: (t: string) => void, lines: string[]) {

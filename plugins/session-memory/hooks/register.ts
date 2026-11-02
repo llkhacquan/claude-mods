@@ -1,10 +1,10 @@
 import type { EngineInterface, Register, Timer } from 'claude-code'
 import { buildAutogroupPrompt, parseAutogroup, README_CHARS, type GroupInfo } from '../lib/autogroup-prompt.ts'
-import { formatRule, groupNames, groupOfPath, groupOfProjectDir, isTmp, isTmpDir, mangle, mergeRules, parseGroups, repoOfPath, ruleOfPath, SKIP, type GroupRule } from '../lib/groups.ts'
+import { formatRule, groupNames, groupOfPath, groupOfProjectDir, isTmp, isTmpDir, mangle, mergeRules, OTHER, parseGroups, repoOfPath, ruleOfPath, SKIP, type GroupRule } from '../lib/groups.ts'
 import { BUSY, withLock, type LockFs } from '../lib/lock.ts'
 import { parseJsonl, type TranscriptRecord } from '../lib/slicer.ts'
 import { buildL0, openNode, refsText, SEARCH_MAX, searchItems } from '../lib/recall.ts'
-import { loadGroup, loadRefs, type StoreIO } from '../lib/store.ts'
+import { forget, loadGroup, loadRefs, saveGroup, type StoreIO } from '../lib/store.ts'
 import { processSession, type Outcome, type Trigger, type WorkerDeps } from '../lib/worker.ts'
 
 type $ = EngineInterface
@@ -13,6 +13,7 @@ type Spender = Trigger | 'autogroup'
 type Usage = { calls: number; in: number; out: number; sweep?: number }
 type Seen = Record<string, { size: number; mtimeMs: number }>
 type Pending = Record<string, string>
+type SweepStop = 'all' | 'max' | 'cap' | 'model'
 
 const IDLE_MS = 10 * 60_000
 const DEBOUNCE_MS = 30 * 60_000
@@ -21,6 +22,8 @@ const MODEL_TIMEOUT_MS = 180_000
 const AUTOGROUP_MAX_TOKENS = 300
 const TOPICS_IN_PROMPT = 8
 const USAGE_DAYS = 14
+const MAX_FAILS = 3
+const CLAIM_STALE_MS = 2 * 60 * 60_000
 const TOOL = 'mcp__session-memory__'
 const OPEN_INTRO = 'Open a session-memory topic node: lists its subtopics and items. A group or repo node id is valid.'
 const EVENTS_MAX_BYTES = 1024 * 1024
@@ -50,8 +53,8 @@ async function emit($: $, ev: string, fields: Record<string, unknown>) {
   if (r.exitCode !== 0) $.ui.log(`session-memory: events.jsonl: ${r.stderr.trim()}`, { to: 'debug' })
 }
 
-function fail($: $, trigger: string, e: unknown) {
-  return emit($, 'fail', { trigger, error: (e as Error).message }).catch(() => undefined)
+function fail($: $, trigger: string, e: unknown, fields: Record<string, unknown> = {}) {
+  return emit($, 'fail', { trigger, ...fields, error: e instanceof Error ? e.message : String(e) }).catch(() => undefined)
 }
 
 async function readRules($: $, file: string, home: string): Promise<GroupRule[]> {
@@ -96,21 +99,39 @@ async function usage($: $): Promise<Record<string, Usage>> {
   return ((await $.store.get('usage')) as Record<string, Usage> | undefined) ?? {}
 }
 
-async function spend($: $, trigger: Spender, inTokens: number, outTokens: number) {
+async function addUsage($: $, add: (cur: Usage) => Usage) {
   const all = await usage($)
   const day = await today($)
-  const cur = all[day] ?? { calls: 0, in: 0, out: 0 }
-  const sweep = (cur.sweep ?? 0) + (trigger === 'sweep' ? 1 : 0)
-  all[day] = { calls: cur.calls + 1, in: cur.in + inTokens, out: cur.out + outTokens, sweep }
+  all[day] = add(all[day] ?? { calls: 0, in: 0, out: 0 })
   const keep = Object.keys(all).sort().slice(-USAGE_DAYS)
   await $.store.set('usage', Object.fromEntries(keep.map(k => [k, all[k]])))
 }
 
+function reserve($: $, trigger: Spender) {
+  return addUsage($, cur => ({ ...cur, calls: cur.calls + 1, sweep: (cur.sweep ?? 0) + (trigger === 'sweep' ? 1 : 0) }))
+}
+
+function spend($: $, inTokens: number, outTokens: number) {
+  return addUsage($, cur => ({ ...cur, in: cur.in + inTokens, out: cur.out + outTokens }))
+}
+
+async function mkdirp($: $, dir: string) {
+  const r = await $.process.run(['mkdir', '-p', dir])
+  if (r.exitCode !== 0) throw new Error(`mkdir ${dir}: ${r.stderr.trim()}`)
+}
+
 function lockFs($: $): LockFs {
   return {
-    mkdir: async p => (await $.process.run(['mkdir', p])).exitCode === 0,
+    mkdir: async p => {
+      const r = await $.process.run(['mkdir', p])
+      if (r.exitCode === 0) return true
+      if (/exists/i.test(r.stderr)) return false
+      throw new Error(`mkdir ${p}: ${r.stderr.trim()}`)
+    },
     rmdir: async p => void (await $.process.run(['rm', '-rf', p])),
     mtime: async p => ((await $.fs.exists(p)) ? (await $.fs.stat(p)).mtimeMs : null),
+    readOwner: async p => ((await $.fs.exists(`${p}/owner`)) ? String(await $.fs.read(`${p}/owner`)) : null),
+    writeOwner: (p, token) => $.fs.write(`${p}/owner`, token),
     now: () => Date.now(),
     sleep: ms => $.clock.sleep(ms),
   }
@@ -132,7 +153,7 @@ function workerDeps($: $, opts: Options, trigger: Trigger, path: string, groupDi
     readRecords: from => readRecords($, path, from),
     complete: (system, prompt, maxTokens) => complete($, opts, system, prompt, maxTokens),
     locked: async fn => {
-      await $.process.run(['mkdir', '-p', groupDir])
+      await mkdirp($, groupDir)
       const r = await withLock(
         lockFs($),
         `${groupDir}/.lock`,
@@ -142,7 +163,8 @@ function workerDeps($: $, opts: Options, trigger: Trigger, path: string, groupDi
       return r === BUSY ? null : r
     },
     callsLeft: () => callsLeft($, opts, trigger),
-    spend: c => spend($, trigger, c.inTokens, c.outTokens),
+    reserve: () => reserve($, trigger),
+    spend: c => spend($, c.inTokens, c.outTokens),
     event: (ev, fields) => emit($, ev, fields),
   }
 }
@@ -177,7 +199,7 @@ async function transcriptPath($: $, projects: string, cwd: string, sid: string):
   return null
 }
 
-async function sweep($: $, opts: Options, group: string, ownSid: string) {
+async function sweep($: $, opts: Options, group: string, ownSid: string, max = opts.sweepMax) {
   const { projects } = await dirs($)
   const rules = await loadRules($)
   const pending = ((await $.store.get('pending')) as Pending | undefined) ?? {}
@@ -201,30 +223,76 @@ async function sweep($: $, opts: Options, group: string, ownSid: string) {
   }
   work.sort((a, b) => Number(!pending[b.sid]) - Number(!pending[a.sid]) || a.mtimeMs - b.mtimeMs)
 
-  const picked = work.slice(0, opts.sweepMax)
+  const picked = work.slice(0, max)
   let done = 0
-  let stop = work.length > picked.length ? 'max' : 'all'
+  let stop: SweepStop = work.length > picked.length ? 'max' : 'all'
   for (const w of picked) {
     const rule = rules.filter(r => w.dir === mangle(r.root) || w.dir.startsWith(`${mangle(r.root)}-`)).sort((a, b) => b.root.length - a.root.length)[0]
-    const out = await runJob($, opts, { sid: w.sid, path: w.path, group, repo: rule ? repoOfPath(rules, rule.root) : '', trigger: 'sweep' })
-    if (!out || !['done', 'headless'].includes(out.stop)) {
-      if (out?.stop === 'cap') {
-        stop = 'cap'
-        break
-      }
+    let out: Outcome | null | typeof BUSY
+    try {
+      out = await claim($, w.sid, () => runJob($, opts, { sid: w.sid, path: w.path, group, repo: rule ? repoOfPath(rules, rule.root) : '', trigger: 'sweep' }))
+    } catch (e) {
+      await fail($, 'sweep', e, { sid: w.sid, group, path: w.path })
+      if (await countFailure($, w.sid, group)) await markSeen($, w.sid, { size: w.size, mtimeMs: w.mtimeMs })
       continue
     }
-    done++
-    seen[w.sid] = { size: w.size, mtimeMs: w.mtimeMs }
-    delete pending[w.sid]
-    await $.store.set('seen', seen)
-    await $.store.set('pending', pending)
+    if (out === BUSY) {
+      await emit($, 'skip', { trigger: 'sweep', sid: w.sid, why: 'claimed' })
+      continue
+    }
+    if (out?.stop === 'cap') {
+      stop = 'cap'
+      break
+    }
+    if (out?.stop === 'model') {
+      stop = 'model'
+      if (!(await countFailure($, w.sid, group))) break
+    } else if (!out || !['done', 'headless'].includes(out.stop)) continue
+    else {
+      done++
+      await clearFailure($, w.sid)
+    }
+    await markSeen($, w.sid, { size: w.size, mtimeMs: w.mtimeMs })
+    if (stop === 'model') break
   }
   await emit($, 'sweep', { group, found: work.length, picked: picked.length, done, stop })
-  return done
+  return { done, stop }
 }
 
-type Live = { opts: Options; active: boolean; cwd: string; group: string; repo: string; loaded: Set<string>; timer?: Timer; lastRun: Map<string, number>; chain: Promise<unknown> }
+async function claim<T>($: $, sid: string, fn: () => Promise<T>): Promise<T | typeof BUSY> {
+  const dir = `${(await dirs($)).state}/claims`
+  await mkdirp($, dir)
+  return withLock(lockFs($), `${dir}/${sid}`, fn, { waitMs: 0, staleMs: CLAIM_STALE_MS })
+}
+
+async function markSeen($: $, sid: string, entry: Seen[string]) {
+  const seen = ((await $.store.get('seen')) as Seen | undefined) ?? {}
+  await $.store.set('seen', { ...seen, [sid]: entry })
+  const pending = ((await $.store.get('pending')) as Pending | undefined) ?? {}
+  if (!(sid in pending)) return
+  delete pending[sid]
+  await $.store.set('pending', pending)
+}
+
+async function clearFailure($: $, sid: string) {
+  const fails = ((await $.store.get('fails')) as Record<string, number> | undefined) ?? {}
+  if (!(sid in fails)) return
+  delete fails[sid]
+  await $.store.set('fails', fails)
+}
+
+async function countFailure($: $, sid: string, group: string): Promise<boolean> {
+  const fails = ((await $.store.get('fails')) as Record<string, number> | undefined) ?? {}
+  const n = (fails[sid] ?? 0) + 1
+  const giveUp = n >= MAX_FAILS
+  if (giveUp) delete fails[sid]
+  else fails[sid] = n
+  await $.store.set('fails', fails)
+  if (giveUp) await emit($, 'give-up', { sid, group, fails: n })
+  return giveUp
+}
+
+type Live = { opts: Options; active: boolean; cwd: string; group: string; grouped: boolean; repo: string; loaded: Set<string>; timer?: Timer; lastRun: Map<string, number>; chain: Promise<unknown> }
 
 function queue<T>(live: Live, fn: () => Promise<T>): Promise<T> {
   const next = live.chain.then(fn, fn)
@@ -248,7 +316,7 @@ async function ownJob($: $, live: Live, trigger: Trigger, sid?: string) {
 }
 
 function runOwn($: $, live: Live, trigger: Trigger, sid?: string) {
-  return queue(live, () => ownJob($, live, trigger, sid)).catch(e => fail($, trigger, e))
+  return queue(live, () => ownJob($, live, trigger, sid)).catch(e => fail($, trigger, e, { sid, group: live.group, cwd: live.cwd }))
 }
 
 async function groupState($: $, group: string) {
@@ -276,6 +344,51 @@ async function recall($: $, live: Live, tool: string, arg: string) {
   for (const id of r.items) live.loaded.add(id)
   await emit($, 'recall', { tool, arg, items: r.items, chars: r.text.length })
   return { result: r.text }
+}
+
+async function forgetItem($: $, live: Live, id: string): Promise<string> {
+  if (!live.grouped) return 'session-memory: still finding this session\'s memory group, try again in a minute.'
+  if (live.group === SKIP) return 'session-memory: this session has no memory group.'
+  if (!id) return 'Usage: /memory-forget <item-id>, e.g. /memory-forget i-12'
+  const dir = `${(await dirs($)).state}/${live.group}`
+  const io = storeIO($)
+  await mkdirp($, dir)
+  const r = await withLock(lockFs($), `${dir}/.lock`, async () => {
+    const state = await loadGroup(io, dir)
+    const it = state.items.get(id)
+    if (!it || it.dead) return null
+    await saveGroup(io, dir, forget(state, id), [])
+    return it.text
+  })
+  if (r === BUSY) return 'session-memory: the group is busy, try again in a minute.'
+  if (r === null) return `No live item ${id} in group ${live.group}.`
+  await emit($, 'forget', { group: live.group, item: id })
+  await registerTools($, live)
+  return `Forgot ${id}: ${r}\nA later user ref brings it back.`
+}
+
+async function backfill($: $, live: Live) {
+  const own = await $.session.id()
+  const done: Record<string, number> = {}
+  for (const group of [...groupNames(await loadRules($)), OTHER]) {
+    if ((await callsLeft($, live.opts, 'sweep')) <= 0) break
+    const r = await sweep($, live.opts, group, own, Infinity)
+    done[group] = r.done
+    if (r.stop === 'model') break
+  }
+  await emit($, 'backfill', { done })
+  if (done[live.group]) await registerTools($, live)
+  $.ui.status(`memory: backfill mined ${Object.values(done).reduce((a, b) => a + b, 0)} transcripts`)
+}
+
+async function startBackfill($: $, live: Live): Promise<string> {
+  const left = await callsLeft($, live.opts, 'sweep')
+  if (left <= 0) return "session-memory: today's sweep share is used up; run /memory-backfill again tomorrow."
+  void queue(live, () => backfill($, live)).catch(async e => {
+    await fail($, 'backfill', e)
+    $.ui.status('memory: backfill failed, see events.jsonl')
+  })
+  return `session-memory: backfill started in the background, up to ${left} model calls today (a third of dailyCalls, shared with the start sweep). Run it again on later days to go on.`
 }
 
 async function repoRoot($: $, cwd: string): Promise<string | null> {
@@ -312,7 +425,7 @@ async function groupInfos($: $, rules: GroupRule[], state: string): Promise<Grou
 
 async function addAutoRule($: $, state: string, home: string, rule: GroupRule): Promise<'written' | 'exists' | 'busy'> {
   const file = `${state}/groups.auto.txt`
-  await $.process.run(['mkdir', '-p', state])
+  await mkdirp($, state)
   const r = await withLock(lockFs($), `${state}/.groups.lock`, async () => {
     const text = (await $.fs.exists(file)) ? String(await $.fs.read(file)) : ''
     if (parseGroups(text, home).some(x => x.root === rule.root)) return 'exists'
@@ -332,9 +445,10 @@ async function autoGroup($: $, live: Live) {
   if ((await callsLeft($, live.opts, 'autogroup')) <= 0) return emit($, 'skip', { trigger: 'autogroup', root, why: 'cap' })
   const names = groupNames(rules)
   const { system, user } = buildAutogroupPrompt({ root, repo, readme: await docsHead($, root), groups: await groupInfos($, rules, state) })
+  await reserve($, 'autogroup')
   const c = await complete($, live.opts, system, user, AUTOGROUP_MAX_TOKENS)
   if ('error' in c) return emit($, 'autogroup', { root, error: c.error, ms: c.ms })
-  await spend($, 'autogroup', c.inTokens, c.outTokens)
+  await spend($, c.inTokens, c.outTokens)
   const a = parseAutogroup(c.text, names)
   if ('error' in a) return emit($, 'autogroup', { root, error: `garbled reply: ${a.error}`, in: c.inTokens, out: c.outTokens, ms: c.ms })
   const written = await addAutoRule($, state, home, { group: a.group, root, ...(a.desc ? { desc: a.desc } : {}) })
@@ -343,15 +457,16 @@ async function autoGroup($: $, live: Live) {
 }
 
 async function startSweep($: $, live: Live) {
-  if (live.opts.autoGroups) await autoGroup($, live).catch(e => fail($, 'autogroup', e))
+  if (live.opts.autoGroups) await autoGroup($, live).catch(e => fail($, 'autogroup', e, { cwd: live.cwd }))
   const rules = await loadRules($)
   live.group = groupOfPath(rules, live.cwd)
+  live.grouped = true
   live.repo = repoOfPath(rules, live.cwd)
   live.loaded = new Set()
   await emit($, 'start', { cwd: live.cwd, group: live.group, ...live.opts })
   if (live.group === SKIP) return
   await registerTools($, live)
-  if ((await sweep($, live.opts, live.group, await $.session.id())) > 0) await registerTools($, live)
+  if ((await sweep($, live.opts, live.group, await $.session.id())).done > 0) await registerTools($, live)
 }
 
 function armIdle($: $, live: Live) {
@@ -371,6 +486,7 @@ export const register: Register = (on, options) => {
     active: false,
     cwd: '',
     group: SKIP,
+    grouped: false,
     repo: '',
     loaded: new Set(),
     lastRun: new Map(),
@@ -381,9 +497,16 @@ export const register: Register = (on, options) => {
     const started = await next(e)
     live.active = e.isInteractive && !isTmp(e.cwd)
     live.cwd = e.cwd
-    if (live.active) void queue(live, () => startSweep($, live)).catch(err => fail($, 'sweep', err))
+    if (live.active) {
+      await $.command.register({ name: 'memory-forget', description: 'Hide one session-memory item from recall', argumentHint: '<item-id>' })
+      await $.command.register({ name: 'memory-backfill', description: 'Mine old transcripts of every memory group in the background' })
+      void queue(live, () => startSweep($, live)).catch(err => ((live.grouped = true), fail($, 'sweep', err, { cwd: live.cwd })))
+    }
     return started
   })
+
+  on('command.run', { command: 'memory-backfill' }, $ => startBackfill($, live).then(text => ({ text })))
+  on('command.run', { command: 'memory-forget' }, async ($, e) => ({ text: await forgetItem($, live, e.args.trim()) }))
 
   for (const name of ['memory_open', 'memory_search', 'memory_refs']) {
     const key = { memory_open: 'node', memory_search: 'query', memory_refs: 'item' }[name] as string
