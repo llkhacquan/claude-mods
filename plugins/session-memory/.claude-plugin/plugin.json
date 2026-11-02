@@ -22,6 +22,12 @@
       "title": "Transcripts per sweep",
       "description": "How many unfinished transcripts a new session picks up in the background",
       "default": 10
+    },
+    "autoGroups": {
+      "type": "boolean",
+      "title": "Auto groups",
+      "description": "File a git repo no rule covers into a group with one model call",
+      "default": true
     }
   }
 }

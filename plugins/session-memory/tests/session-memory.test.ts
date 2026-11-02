@@ -17,7 +17,7 @@ const transcript = (turns: number, tag = 'q') =>
 const opsFor = (text: string) =>
   JSON.stringify({ ops: [{ op: 'new', node: 'be', text, type: 'rule', ref: { lines: ['L1'], by: 'user', stance: 'for', quote: 'about deploys' } }] })
 
-function harness(on: On, opts: { files?: Record<string, string>; mtimes?: Record<string, number>; now?: number } = {}) {
+function harness(on: On, opts: { files?: Record<string, string>; mtimes?: Record<string, number>; now?: number; git?: Record<string, string>; modelDown?: boolean } = {}) {
   const clock = mock.clock(on, { now: opts.now ?? 100 * 24 * 60 * MIN })
   mock.env(on, { HOME })
   const files = new Map<string, string>(Object.entries({ [`${HOME}/.config/session-memory/groups.txt`]: `be ${CWD}\n`, ...opts.files }))
@@ -28,6 +28,7 @@ function harness(on: On, opts: { files?: Record<string, string>; mtimes?: Record
   const statuses: (string | undefined)[] = []
   const answers: string[] = []
   const tools = new Map<string, string>()
+  const git: string[] = []
   const under = (dir: string) => [...files.keys()].filter(p => p.startsWith(`${dir}/`)).map(p => p.slice(dir.length + 1))
 
   on('session.id', () => ({ value: SID }))
@@ -76,7 +77,11 @@ function harness(on: On, opts: { files?: Record<string, string>; mtimes?: Record
     else if (cmd === 'mkdir') exitCode = dirs.has(args[0] as string) ? 1 : (dirs.add(args[0] as string), 0)
     else if (cmd === 'rm') dirs.delete(args[1] as string)
     else if (cmd === 'sh') files.set(args[4] as string, `${files.get(args[4] as string) ?? ''}${args[3]}\n`)
-    else if (cmd === 'mv') {
+    else if (cmd === 'git') {
+      git.push(args[1] as string)
+      const common = opts.git?.[args[1] as string]
+      return { value: { exitCode: common ? 0 : 128, stdout: common ? `${common}\n` : '', stderr: common ? '' : 'fatal: not a git repository', isStdoutTruncated: false, isStderrTruncated: false } }
+    } else if (cmd === 'mv') {
       files.set(args[2] as string, files.get(args[1] as string) ?? '')
       files.delete(args[1] as string)
     }
@@ -90,12 +95,13 @@ function harness(on: On, opts: { files?: Record<string, string>; mtimes?: Record
   })
   on('model.complete', ($, e) => {
     prompts.push(String(e.prompt))
+    if (opts.modelDown) return { value: { isAnswered: false, reason: 'timeout' } as ModelCompleteResult }
     return { value: { isAnswered: true, text: answers.shift() ?? '{"ops":[]}', usage: USAGE } as ModelCompleteResult }
   })
 
   const events = () => (files.get(`${STATE}/events.jsonl`) ?? '').split('\n').filter(Boolean).map(l => JSON.parse(l))
   const items = (group = 'be') => (files.get(`${STATE}/${group}/items.jsonl`) ?? '').split('\n').filter(Boolean).map(l => JSON.parse(l))
-  return { clock, files, store, prompts, statuses, answers, items, events, tools }
+  return { clock, files, store, prompts, statuses, answers, items, events, tools, git }
 }
 
 const own = (dir = '-work-api') => `${PROJECTS}/${dir}/${SID}.jsonl`
@@ -133,7 +139,7 @@ test('the events log tells why a run did or did not happen and what it cost', as
   await h.clock.advance(10 * MIN)
   const evs = h.events().map(({ ts, ...rest }) => rest)
   expect(evs.map(e => e.ev)).toEqual(['start', 'tools', 'sweep', 'slice', 'job', 'tools', 'skip'])
-  expect(evs[0]).toEqual({ by: SID, ev: 'start', cwd: CWD, group: 'be', model: 'sonnet', dailyCalls: 150, sweepMax: 10 })
+  expect(evs[0]).toEqual({ by: SID, ev: 'start', cwd: CWD, group: 'be', model: 'sonnet', dailyCalls: 150, sweepMax: 10, autoGroups: true })
   expect(evs[3]).toMatchObject({ ev: 'slice', sid: SID, from: 0, to: 6, turns: 3, in: 900, out: 40, ops: { new: 1 }, skipped: [], errors: [] })
   expect(evs[4]).toMatchObject({ ev: 'job', trigger: 'idle', sid: SID, group: 'be', stop: 'done', slices: 1, calls: 1 })
   expect(evs[6]).toEqual({ by: SID, ev: 'skip', trigger: 'idle', sid: SID, why: 'debounce' })
@@ -308,4 +314,107 @@ test('an idle run that made no call does not hold off the next idle run', async 
   await turn($)
   await h.clock.advance(10 * MIN)
   expect(h.prompts).toHaveLength(1)
+})
+
+const NEW_REPO = '/work/billing'
+const AUTO = `${STATE}/groups.auto.txt`
+
+test('a git repo in no group is filed once by the model, then read from groups.auto.txt', async ($, on) => {
+  const h = harness(on, { git: { [`${NEW_REPO}/worktree/fix`]: `${NEW_REPO}/.git` }, files: { [`${NEW_REPO}/README.md`]: '# billing\ninvoices service' } })
+  h.answers.push(JSON.stringify({ action: 'join', group: 'be' }))
+  await start($, true, `${NEW_REPO}/worktree/fix`)
+  await h.clock.settle()
+  expect(h.prompts).toHaveLength(1)
+  expect(h.prompts[0]).toContain('ROOT: /work/billing')
+  expect(h.prompts[0]).toContain('invoices service')
+  expect(h.prompts[0]).toContain('- be\n  repos: api')
+  expect(h.files.get(AUTO)).toBe('be /work/billing\n')
+  expect(h.statuses).toContain('memory: billing -> be (auto)')
+  expect(h.events().find(e => e.ev === 'autogroup')).toMatchObject({ root: NEW_REPO, action: 'join', group: 'be', written: 'written' })
+  expect(h.events().find(e => e.ev === 'start')).toMatchObject({ group: 'be' })
+  expect(Object.values(h.store.get('usage') as object)).toEqual([{ calls: 1, in: 900, out: 40, sweep: 0 }])
+
+  await start($, true, NEW_REPO)
+  await h.clock.settle()
+  expect(h.prompts).toHaveLength(1)
+  expect(h.git).toHaveLength(1)
+})
+
+test('an "other" answer is cached so the root costs one call ever', async ($, on) => {
+  const h = harness(on, { git: { [NEW_REPO]: `${NEW_REPO}/.git` } })
+  h.answers.push('{"action":"other"}')
+  await start($, true, NEW_REPO)
+  await h.clock.settle()
+  expect(h.files.get(AUTO)).toBe('other /work/billing\n')
+  expect(h.events().find(e => e.ev === 'autogroup')).toMatchObject({ group: 'other', why: 'model said other' })
+  await start($, true, NEW_REPO)
+  await h.clock.settle()
+  expect(h.prompts).toHaveLength(1)
+})
+
+test('a garbled answer writes nothing, so the next session asks again', async ($, on) => {
+  const h = harness(on, { git: { [NEW_REPO]: `${NEW_REPO}/.git` } })
+  h.answers.push('not json')
+  await start($, true, NEW_REPO)
+  await h.clock.settle()
+  expect(h.files.has(AUTO)).toBe(false)
+  expect(h.events().find(e => e.ev === 'autogroup')).toMatchObject({ root: NEW_REPO, error: 'garbled reply: no parsable JSON' })
+  expect(h.statuses).not.toContain('memory: billing -> other (auto)')
+  await start($, true, NEW_REPO)
+  await h.clock.settle()
+  expect(h.prompts).toHaveLength(2)
+})
+
+test('a user rule beats an auto rule inside its root, even a longer one', async ($, on) => {
+  const h = harness(on, { files: { [AUTO]: 'web /work/billing  # sites\n', [`${HOME}/.config/session-memory/groups.txt`]: 'be /work\n' } })
+  await start($, true, NEW_REPO)
+  await h.clock.settle()
+  expect(h.events().find(e => e.ev === 'start')).toMatchObject({ group: 'be' })
+})
+
+test('a model error writes nothing, so the next session asks again', async ($, on) => {
+  const h = harness(on, { git: { [NEW_REPO]: `${NEW_REPO}/.git` }, modelDown: true })
+  await start($, true, NEW_REPO)
+  await h.clock.settle()
+  expect(h.files.has(AUTO)).toBe(false)
+  expect(h.events().find(e => e.ev === 'autogroup')).toMatchObject({ root: NEW_REPO, error: 'timeout' })
+  await start($, true, NEW_REPO)
+  await h.clock.settle()
+  expect(h.prompts).toHaveLength(2)
+})
+
+test('a dir outside git makes no call', async ($, on) => {
+  const h = harness(on)
+  await start($, true, '/work/notes')
+  await h.clock.settle()
+  expect(h.prompts).toHaveLength(0)
+  expect(h.files.has(AUTO)).toBe(false)
+})
+
+test('autoGroups false never asks the model', { options: { autoGroups: false } }, async ($, on) => {
+  const h = harness(on, { git: { [NEW_REPO]: `${NEW_REPO}/.git` } })
+  await start($, true, NEW_REPO)
+  await h.clock.settle()
+  expect(h.git).toHaveLength(0)
+  expect(h.prompts).toHaveLength(0)
+})
+
+test('a session under the macOS temp dir is never mined', async ($, on) => {
+  const cwd = '/private/var/folders/ab/T/TestGate1/001'
+  const h = harness(on, { files: { [own(`-private-var-folders-ab-T-TestGate1-001`)]: transcript(3) } })
+  await start($, true, cwd)
+  await turn($)
+  await h.clock.advance(15 * MIN)
+  expect(h.prompts).toHaveLength(0)
+  expect(h.events()).toEqual([])
+})
+
+test('past the daily cap an unlisted repo stays other and the next session asks', { options: { dailyCalls: 0 } }, async ($, on) => {
+  const h = harness(on, { git: { [NEW_REPO]: `${NEW_REPO}/.git` } })
+  await start($, true, NEW_REPO)
+  await h.clock.settle()
+  expect(h.prompts).toHaveLength(0)
+  expect(h.files.has(AUTO)).toBe(false)
+  expect(h.events().find(e => e.ev === 'skip')).toMatchObject({ trigger: 'autogroup', root: NEW_REPO, why: 'cap' })
+  expect(h.events().find(e => e.ev === 'start')).toMatchObject({ group: 'other' })
 })

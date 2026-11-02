@@ -23,8 +23,18 @@ skip     ~/code/sandbox
 ```
 
 - A root covers its worktrees and sub folders. The longest matching root wins.
-- A session in no listed root goes to group `other`. Group `skip` is never mined, and neither are sessions under `/tmp`.
+- A session in no listed root goes to group `other`. Group `skip` is never mined, and neither are sessions under `/tmp` or `/var/folders` (the macOS `$TMPDIR`, where test suites run `claude -p`).
 - Headless runs (`claude -p`, the SDK) are never mined.
+
+### Auto groups
+
+When an interactive session starts in a git repo that no rule covers, one model call files the repo (the main repo root, so worktrees land on it): join a listed group, make a new group, or `other`. The answer is appended to `~/.local/state/session-memory/groups.auto.txt` as `group root  # desc`, and the status line shows `memory: <repo> -> <group> (auto)`. Each root costs one call ever; `other` answers are kept too. A model error or a garbled reply writes nothing, so the next session asks again.
+
+- The model sees the repo path, the head of its `CLAUDE.md` or `README.md`, and each group with its repos, description and top topics.
+- At most 8 groups (yours and auto ones). At the cap a new group becomes `other`.
+- Your `groups.txt` wins: an auto rule at or under one of your roots is ignored. To fix a wrong guess, add a line to `groups.txt`. To stop, set `autoGroups` to `false`.
+- The call counts against `dailyCalls`; past the cap the session stays `other` and the next one asks.
+- Items mined into `other` before the repo got a group stay in `other`.
 
 ## When it runs
 
@@ -45,6 +55,7 @@ Each slice of a transcript goes to the model once. The record of what was mined 
 | `model` | `sonnet` | model that extracts and files items |
 | `dailyCalls` | `150` | model calls per day; past it, work waits for the next day. The start sweep gets at most a third; idle, compact and clear runs keep the rest |
 | `sweepMax` | `10` | transcripts one session start picks up |
+| `autoGroups` | `true` | file unlisted git repos into a group with one model call |
 
 ## Files
 
@@ -78,13 +89,14 @@ Every run appends one JSON line per event to `~/.local/state/session-memory/even
 | `ev` | When | Fields |
 |---|---|---|
 | `start` | an interactive session starts | `cwd`, `group`, options |
+| `autogroup` | an unlisted repo is filed | `root`, `action`, `group`, `why`, `written` (`written`, `exists`, `busy`), `in`, `out`, `ms`, or `error` |
 | `sweep` | the start sweep ends | `found`, `picked`, `done`, `stop` (`all`, `max`, `cap`) |
 | `job` | one transcript is processed | `trigger`, `sid`, `group`, `stop`, `slices`, `calls`, `ms` |
 | `slice` | one model call is filed | `from`, `to`, `turns`, `cands`, `in`, `out`, `ms`, `ops`, `items`, `skipped`, `errors` |
 | `split` | a topic over 30 children is split | `node`, `children` or `error` |
 | `tools` | the memory tools are registered | `l0Chars`, `l0Items` |
 | `recall` | a memory tool is called | `tool`, `arg`, `items`, `chars` |
-| `skip` | a trigger did nothing | `why` (`debounce`, `group skip`, `no transcript`) |
+| `skip` | a trigger did nothing | `why` (`debounce`, `group skip`, `no transcript`, `cap` for an autogroup call) |
 | `model-error`, `busy`, `lock-stale`, `fail` | something went wrong | the error |
 | `end` | a session ends | `reason` |
 

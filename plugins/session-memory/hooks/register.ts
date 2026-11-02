@@ -1,13 +1,15 @@
 import type { EngineInterface, Register, Timer } from 'claude-code'
-import { groupOfPath, groupOfProjectDir, mangle, parseGroups, repoOfPath, SKIP, type GroupRule } from '../lib/groups.ts'
-import { BUSY, withLock } from '../lib/lock.ts'
+import { buildAutogroupPrompt, parseAutogroup, README_CHARS, type GroupInfo } from '../lib/autogroup-prompt.ts'
+import { formatRule, groupNames, groupOfPath, groupOfProjectDir, isTmp, isTmpDir, mangle, mergeRules, parseGroups, repoOfPath, ruleOfPath, SKIP, type GroupRule } from '../lib/groups.ts'
+import { BUSY, withLock, type LockFs } from '../lib/lock.ts'
 import { parseJsonl, type TranscriptRecord } from '../lib/slicer.ts'
 import { buildL0, openNode, refsText, SEARCH_MAX, searchItems } from '../lib/recall.ts'
 import { loadGroup, loadRefs, type StoreIO } from '../lib/store.ts'
 import { processSession, type Outcome, type Trigger, type WorkerDeps } from '../lib/worker.ts'
 
 type $ = EngineInterface
-type Options = { model: string; dailyCalls: number; sweepMax: number }
+type Options = { model: string; dailyCalls: number; sweepMax: number; autoGroups: boolean }
+type Spender = Trigger | 'autogroup'
 type Usage = { calls: number; in: number; out: number; sweep?: number }
 type Seen = Record<string, { size: number; mtimeMs: number }>
 type Pending = Record<string, string>
@@ -16,8 +18,9 @@ const IDLE_MS = 10 * 60_000
 const DEBOUNCE_MS = 30 * 60_000
 const SWEEP_IDLE_MS = 30 * 60_000
 const MODEL_TIMEOUT_MS = 180_000
+const AUTOGROUP_MAX_TOKENS = 300
+const TOPICS_IN_PROMPT = 8
 const USAGE_DAYS = 14
-const TMP_ROOTS = ['/tmp', '/private/tmp']
 const TOOL = 'mcp__session-memory__'
 const OPEN_INTRO = 'Open a session-memory topic node: lists its subtopics and items. A group or repo node id is valid.'
 const EVENTS_MAX_BYTES = 1024 * 1024
@@ -51,15 +54,14 @@ function fail($: $, trigger: string, e: unknown) {
   return emit($, 'fail', { trigger, error: (e as Error).message }).catch(() => undefined)
 }
 
-async function loadRules($: $): Promise<GroupRule[]> {
-  const { home, config } = await dirs($)
-  const file = `${config}/groups.txt`
-  if (!(await $.fs.exists(file))) return []
-  return parseGroups(String(await $.fs.read(file)), home)
+async function readRules($: $, file: string, home: string): Promise<GroupRule[]> {
+  return (await $.fs.exists(file)) ? parseGroups(String(await $.fs.read(file)), home) : []
 }
 
-const isTmp = (path: string) => TMP_ROOTS.some(r => path === r || path.startsWith(`${r}/`))
-const isTmpDir = (dirName: string) => TMP_ROOTS.some(r => dirName.startsWith(mangle(r)))
+async function loadRules($: $): Promise<GroupRule[]> {
+  const { home, config, state } = await dirs($)
+  return mergeRules(await readRules($, `${config}/groups.txt`, home), await readRules($, `${state}/groups.auto.txt`, home))
+}
 
 function storeIO($: $): StoreIO {
   return {
@@ -83,7 +85,7 @@ async function readRecords($: $, path: string, from: number): Promise<Transcript
   return parseJsonl(text.endsWith('\n') ? text : text.slice(0, text.lastIndexOf('\n') + 1))
 }
 
-async function callsLeft($: $, opts: Options, trigger: Trigger): Promise<number> {
+async function callsLeft($: $, opts: Options, trigger: Spender): Promise<number> {
   const cur = (await usage($))[await today($)]
   const total = opts.dailyCalls - (cur?.calls ?? 0)
   if (trigger !== 'sweep') return total
@@ -94,7 +96,7 @@ async function usage($: $): Promise<Record<string, Usage>> {
   return ((await $.store.get('usage')) as Record<string, Usage> | undefined) ?? {}
 }
 
-async function spend($: $, trigger: Trigger, inTokens: number, outTokens: number) {
+async function spend($: $, trigger: Spender, inTokens: number, outTokens: number) {
   const all = await usage($)
   const day = await today($)
   const cur = all[day] ?? { calls: 0, in: 0, out: 0 }
@@ -104,29 +106,35 @@ async function spend($: $, trigger: Trigger, inTokens: number, outTokens: number
   await $.store.set('usage', Object.fromEntries(keep.map(k => [k, all[k]])))
 }
 
+function lockFs($: $): LockFs {
+  return {
+    mkdir: async p => (await $.process.run(['mkdir', p])).exitCode === 0,
+    rmdir: async p => void (await $.process.run(['rm', '-rf', p])),
+    mtime: async p => ((await $.fs.exists(p)) ? (await $.fs.stat(p)).mtimeMs : null),
+    now: () => Date.now(),
+    sleep: ms => $.clock.sleep(ms),
+  }
+}
+
+async function complete($: $, opts: Options, system: string, prompt: string, maxTokens: number) {
+  const t0 = await $.clock.now()
+  const r = await $.model.complete({ model: opts.model, system, prompt, maxTokens, timeoutMs: MODEL_TIMEOUT_MS })
+  const ms = (await $.clock.now()) - t0
+  if (r.isAnswered) return { text: r.text, inTokens: r.usage.input_tokens, outTokens: r.usage.output_tokens, ms }
+  return { error: 'status' in r ? `${r.reason} ${r.status ?? ''} ${r.error}` : r.reason, ms }
+}
+
 function workerDeps($: $, opts: Options, trigger: Trigger, path: string, groupDir: string): WorkerDeps {
   const io = storeIO($)
   return {
     io,
     size: async p => ((await $.fs.exists(p)) ? (await $.fs.stat(p)).size : null),
     readRecords: from => readRecords($, path, from),
-    complete: async (system, prompt, maxTokens) => {
-      const t0 = await $.clock.now()
-      const r = await $.model.complete({ model: opts.model, system, prompt, maxTokens, timeoutMs: MODEL_TIMEOUT_MS })
-      const ms = (await $.clock.now()) - t0
-      if (r.isAnswered) return { text: r.text, inTokens: r.usage.input_tokens, outTokens: r.usage.output_tokens, ms }
-      return { error: 'status' in r ? `${r.reason} ${r.status ?? ''} ${r.error}` : r.reason, ms }
-    },
+    complete: (system, prompt, maxTokens) => complete($, opts, system, prompt, maxTokens),
     locked: async fn => {
       await $.process.run(['mkdir', '-p', groupDir])
       const r = await withLock(
-        {
-          mkdir: async p => (await $.process.run(['mkdir', p])).exitCode === 0,
-          rmdir: async p => void (await $.process.run(['rm', '-rf', p])),
-          mtime: async p => ((await $.fs.exists(p)) ? (await $.fs.stat(p)).mtimeMs : null),
-          now: () => Date.now(),
-          sleep: ms => $.clock.sleep(ms),
-        },
+        lockFs($),
         `${groupDir}/.lock`,
         fn,
         { onStale: ageMs => emit($, 'lock-stale', { dir: groupDir, ageMs }) },
@@ -270,7 +278,72 @@ async function recall($: $, live: Live, tool: string, arg: string) {
   return { result: r.text }
 }
 
+async function repoRoot($: $, cwd: string): Promise<string | null> {
+  const r = await $.process.run(['git', '-C', cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+  const common = r.stdout.trim().replace(/\/+$/, '')
+  if (r.exitCode !== 0 || !common.startsWith('/')) return null
+  return common.slice(0, common.lastIndexOf('/')) || null
+}
+
+async function docsHead($: $, root: string): Promise<string> {
+  for (const name of ['CLAUDE.md', 'README.md']) {
+    const p = `${root}/${name}`
+    if (await $.fs.exists(p)) return String(await $.fs.read(p)).slice(0, README_CHARS)
+  }
+  return ''
+}
+
+async function groupInfos($: $, rules: GroupRule[], state: string): Promise<GroupInfo[]> {
+  const io = storeIO($)
+  const infos: GroupInfo[] = []
+  for (const name of groupNames(rules)) {
+    const own = rules.filter(r => r.group === name)
+    let topics: string[] = []
+    try {
+      const nodes = JSON.parse((await io.read(`${state}/${name}/nodes.json`)) ?? '[]') as { parent: string | null; title: string }[]
+      topics = nodes.filter(n => n.parent === name).map(n => n.title).slice(0, TOPICS_IN_PROMPT)
+    } catch {
+      topics = []
+    }
+    infos.push({ name, desc: own.find(r => r.desc)?.desc ?? '', repos: own.map(r => r.root.split('/').pop() ?? ''), topics })
+  }
+  return infos
+}
+
+async function addAutoRule($: $, state: string, home: string, rule: GroupRule): Promise<'written' | 'exists' | 'busy'> {
+  const file = `${state}/groups.auto.txt`
+  await $.process.run(['mkdir', '-p', state])
+  const r = await withLock(lockFs($), `${state}/.groups.lock`, async () => {
+    const text = (await $.fs.exists(file)) ? String(await $.fs.read(file)) : ''
+    if (parseGroups(text, home).some(x => x.root === rule.root)) return 'exists'
+    await storeIO($).write(file, `${text}${text && !text.endsWith('\n') ? '\n' : ''}${formatRule(rule)}\n`)
+    return 'written'
+  })
+  return r === BUSY ? 'busy' : r
+}
+
+async function autoGroup($: $, live: Live) {
+  const { home, state } = await dirs($)
+  const rules = await loadRules($)
+  if (ruleOfPath(rules, live.cwd)) return
+  const root = await repoRoot($, live.cwd)
+  if (!root || rules.some(r => r.root === root)) return
+  const repo = root.split('/').pop() ?? ''
+  if ((await callsLeft($, live.opts, 'autogroup')) <= 0) return emit($, 'skip', { trigger: 'autogroup', root, why: 'cap' })
+  const names = groupNames(rules)
+  const { system, user } = buildAutogroupPrompt({ root, repo, readme: await docsHead($, root), groups: await groupInfos($, rules, state) })
+  const c = await complete($, live.opts, system, user, AUTOGROUP_MAX_TOKENS)
+  if ('error' in c) return emit($, 'autogroup', { root, error: c.error, ms: c.ms })
+  await spend($, 'autogroup', c.inTokens, c.outTokens)
+  const a = parseAutogroup(c.text, names)
+  if ('error' in a) return emit($, 'autogroup', { root, error: `garbled reply: ${a.error}`, in: c.inTokens, out: c.outTokens, ms: c.ms })
+  const written = await addAutoRule($, state, home, { group: a.group, root, ...(a.desc ? { desc: a.desc } : {}) })
+  await emit($, 'autogroup', { root, action: a.action, group: a.group, ...(a.why ? { why: a.why } : {}), written, in: c.inTokens, out: c.outTokens, ms: c.ms })
+  if (written !== 'busy') $.ui.status(`memory: ${repo} -> ${a.group} (auto)`)
+}
+
 async function startSweep($: $, live: Live) {
+  if (live.opts.autoGroups) await autoGroup($, live).catch(e => fail($, 'autogroup', e))
   const rules = await loadRules($)
   live.group = groupOfPath(rules, live.cwd)
   live.repo = repoOfPath(rules, live.cwd)
@@ -294,7 +367,7 @@ async function markPending($: $, sid: string, cwd: string) {
 
 export const register: Register = (on, options) => {
   const live: Live = {
-    opts: { model: String(options.model || 'sonnet'), dailyCalls: num(options.dailyCalls, 150), sweepMax: num(options.sweepMax, 10) },
+    opts: { model: String(options.model || 'sonnet'), dailyCalls: num(options.dailyCalls, 150), sweepMax: num(options.sweepMax, 10), autoGroups: options.autoGroups !== false && options.autoGroups !== 'false' },
     active: false,
     cwd: '',
     group: SKIP,
