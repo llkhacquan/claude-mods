@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Session Memory</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,700;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* layout: one reading column; the transcript "sieve" is the hero, the rest is a quiet spec sheet */
+:root {
+  --bg: #f2f4f6;
+  --panel: #ffffff;
+  --ink: #16202a;
+  --muted: #5d6b78;
+  --faint: #a9b4bf;
+  --rule: #d8dee4;
+  --mark: #f5c518;
+  --mark-ink: #3a2f00;
+  --keep: #0f7b6c;
+  --drop: #b9c2cb;
+  --err: #b4442f;
+  --font-display: "Bricolage Grotesque", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e141a; --panel: #151d25; --ink: #e5ebf0; --muted: #93a1ae; --faint: #4f5d6a;
+    --rule: #263340; --mark: #f2c230; --mark-ink: #1d1700; --keep: #3cc4ae; --drop: #3a4753; --err: #e07a63;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e141a; --panel: #151d25; --ink: #e5ebf0; --muted: #93a1ae; --faint: #4f5d6a;
+  --rule: #263340; --mark: #f2c230; --mark-ink: #1d1700; --keep: #3cc4ae; --drop: #3a4753; --err: #e07a63;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 400 17px/1.6 var(--font-body);
+}
+.wrap {
+  max-width: 980px; margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 0;
+}
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
+p { margin: 0; max-width: 64ch; }
+code, .mono { font-family: var(--font-mono); font-size: 0.88em; }
+.eyebrow {
+  font: 600 12px/1 var(--font-mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted);
+}
+a { color: var(--keep); }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--mark); outline-offset: 3px; }
+
+header.top { padding-block: 28px 0; display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+.brand { font: 800 18px/1 var(--font-display); letter-spacing: -0.01em; }
+.status { font: 500 13px/1 var(--font-mono); color: var(--muted); border: 1px solid var(--rule); border-radius: 999px; padding: 7px 12px; }
+
+.hero { padding-block: 56px 40px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 48px; align-items: center; }
+.hero h1 { font-size: clamp(40px, 6.4vw, 72px); line-height: 0.98; font-weight: 800; letter-spacing: -0.03em; }
+.hero h1 mark { background: linear-gradient(transparent 58%, var(--mark) 58%, var(--mark) 92%, transparent 92%); color: inherit; padding: 0 2px; }
+.hero .lede { margin-top: 22px; font-size: 19px; color: var(--muted); }
+.hero .lede strong { color: var(--ink); font-weight: 600; }
+
+.sieve {
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 10px;
+  font: 400 13px/1.55 var(--font-mono); overflow: hidden; min-width: 0;
+}
+.sieve .bar { display: flex; justify-content: space-between; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--rule); color: var(--muted); font-size: 12px; }
+.sieve ol { list-style: none; margin: 0; padding: 10px 0; }
+.sieve li { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 10px; padding: 2px 14px; white-space: nowrap; }
+.sieve li span:last-child { overflow: hidden; text-overflow: ellipsis; }
+.sieve .tag { color: var(--muted); }
+.sieve .drop { color: var(--drop); }
+.sieve .drop span:last-child { text-decoration: line-through; text-decoration-color: var(--drop); }
+.sieve .keep .tag { color: var(--keep); font-weight: 600; }
+.sieve .err .tag { color: var(--err); font-weight: 600; }
+.sieve .gray .tag { color: var(--mark-ink); background: var(--mark); border-radius: 3px; padding: 0 4px; justify-self: start; }
+.sieve .fact { margin: 6px 14px 12px; padding: 10px 12px; border: 1px dashed var(--keep); border-radius: 6px; white-space: normal; }
+.sieve .fact b { color: var(--keep); }
+@media (prefers-reduced-motion: no-preference) {
+  .sieve .drop { animation: fade 1.6s ease-out both; }
+  .sieve .drop:nth-child(2) { animation-delay: .2s } .sieve .drop:nth-child(4) { animation-delay: .4s }
+  .sieve .drop:nth-child(6) { animation-delay: .6s } .sieve .drop:nth-child(8) { animation-delay: .8s }
+  @keyframes fade { from { color: var(--ink); } to { color: var(--drop); } }
+}
+
+section { padding-block: 56px; border-top: 1px solid var(--rule); }
+section > h2 { font-size: clamp(28px, 3.6vw, 40px); line-height: 1.08; letter-spacing: -0.02em; font-weight: 700; margin-top: 10px; }
+section > p { margin-top: 14px; color: var(--muted); }
+
+.ratio { margin-top: 32px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; border: 1px solid var(--rule); border-radius: 10px; background: var(--panel); overflow: hidden; }
+.ratio div { padding: 22px 20px; border-left: 1px solid var(--rule); min-width: 0; }
+.ratio div:first-child { border-left: 0; }
+.ratio .n { font: 700 clamp(28px, 4vw, 42px)/1 var(--font-display); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.ratio .u { font: 500 13px/1.4 var(--font-mono); color: var(--muted); margin-top: 8px; }
+.ratio .n.hl { color: var(--keep); }
+.bars { margin-top: 18px; display: grid; gap: 6px; }
+.bars .row { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 12px; align-items: center; font: 500 12px/1 var(--font-mono); color: var(--muted); }
+.bars .track { height: 10px; background: transparent; }
+.bars .fill { height: 100%; background: var(--ink); border-radius: 2px; min-width: 2px; }
+.bars .fill.k { background: var(--keep); }
+.foot { margin-top: 12px; font: 400 12px/1.5 var(--font-mono); color: var(--muted); }
+
+.timeline { margin-top: 30px; display: grid; gap: 0; }
+.ev { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 24px; padding-block: 16px; border-bottom: 1px dashed var(--rule); }
+.ev:last-child { border-bottom: 0; }
+.ev code { font-weight: 600; color: var(--ink); font-size: 14px; }
+.ev p { color: var(--muted); font-size: 16px; }
+.ev p b { color: var(--ink); font-weight: 600; }
+
+.two { margin-top: 30px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px; align-items: start; }
+pre.card { margin: 0; background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 18px; font: 400 13px/1.6 var(--font-mono); overflow-x: auto; }
+pre.card .k { color: var(--muted); }
+pre.card .v { color: var(--keep); }
+.decisions { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.decisions li { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 14px; font-size: 16px; color: var(--muted); }
+.decisions li b { font: 600 13px/1.9 var(--font-mono); color: var(--ink); }
+.decisions li.warn b { color: var(--err); }
+.rule-line { margin-top: 18px; padding: 14px 16px; border-left: 3px solid var(--mark); background: var(--panel); font-size: 16px; }
+
+.guards { margin-top: 30px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; }
+.guards h3 { font-size: 19px; font-weight: 700; }
+.guards p { margin-top: 8px; color: var(--muted); font-size: 16px; }
+
+.groups { margin-top: 26px; display: flex; flex-wrap: wrap; gap: 12px; }
+.pool { border: 1px solid var(--rule); border-radius: 10px; background: var(--panel); padding: 14px 16px; min-width: 0; flex: 1 1 260px; }
+.pool .name { font: 600 13px/1 var(--font-mono); color: var(--keep); }
+.pool .repos { margin-top: 8px; font: 400 14px/1.5 var(--font-mono); color: var(--muted); }
+
+.roadmap { margin-top: 26px; list-style: none; padding: 0; display: grid; gap: 8px; counter-reset: ph; }
+.roadmap li { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; gap: 12px; align-items: baseline; font-size: 16px; counter-increment: ph; }
+.roadmap li::before { content: counter(ph); font: 600 13px/1 var(--font-mono); color: var(--muted); }
+.pill { font: 600 11px/1 var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; border-radius: 999px; padding: 5px 9px; border: 1px solid var(--rule); color: var(--muted); white-space: nowrap; }
+.pill.done { border-color: var(--keep); color: var(--keep); }
+.pill.run { border-color: var(--mark); color: var(--ink); background: var(--mark); color: var(--mark-ink); }
+
+footer { padding-block: 40px 56px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 14px; }
+
+@media (max-width: 760px) {
+  .hero { grid-template-columns: minmax(0, 1fr); gap: 32px; padding-block: 36px 32px; }
+  .ratio { grid-template-columns: minmax(0, 1fr); }
+  .ratio div { border-left: 0; border-top: 1px solid var(--rule); }
+  .ratio div:first-child { border-top: 0; }
+  .ev { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .two, .guards { grid-template-columns: minmax(0, 1fr); }
+  .sieve li { grid-template-columns: 78px minmax(0, 1fr); }
+  .bars .row { grid-template-columns: 84px minmax(0, 1fr); }
+}
+
+.tabs { position: sticky; top: 0; z-index: 2; background: var(--bg); display: flex; gap: 4px; border-bottom: 1px solid var(--rule); overflow-x: auto; scrollbar-width: none; }
+.tabs button { appearance: none; border: 0; background: none; color: var(--muted); font: 600 14px/1 var(--font-mono); letter-spacing: 0.04em; padding: 16px 14px 14px; cursor: pointer; border-bottom: 3px solid transparent; white-space: nowrap; }
+.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--mark); }
+.tabs button:hover { color: var(--ink); }
+.panel[hidden] { display: none; }
+.panel > section:first-child { border-top: 0; }
+.qa { margin-top: 28px; display: grid; gap: 0; border: 1px solid var(--rule); border-radius: 10px; background: var(--panel); overflow: hidden; }
+.qa div { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 20px; padding: 18px 20px; border-top: 1px solid var(--rule); }
+.qa div:first-child { border-top: 0; }
+.qa b { font: 600 14px/1.5 var(--font-mono); color: var(--ink); }
+.qa p { color: var(--muted); font-size: 16px; }
+.flow { margin-top: 28px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+.flow div { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 14px; min-width: 0; }
+.flow b { display: block; font: 600 13px/1.3 var(--font-mono); color: var(--keep); }
+.flow span { display: block; margin-top: 6px; font-size: 14px; line-height: 1.45; color: var(--muted); }
+@media (max-width: 760px) {
+  .qa div { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .flow { grid-template-columns: minmax(0, 1fr); }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <span class="brand">Session Memory</span>
+    <span class="status">Claude Code mod · in development</span>
+  </header>
+
+  <div class="hero">
+    <div>
+      <h1>Your sessions already learned it. <mark>Keep it.</mark></h1>
+      <p class="lede">Every Claude Code session ends with lessons in it: a root cause you proved, a rule you set, a tool that lied. <strong>Session Memory reads each session, keeps the few lines that matter, and files them as info with the sessions they came from.</strong> The next session sees the info and how often it was said, and opens the proof only when it needs it.</p>
+    </div>
+
+    <figure class="sieve" aria-label="Example: a session transcript filtered down to one info item" style="margin:0">
+      <div class="bar"><span>payments/worktree/tls · 23 MB</span><span>32 KB kept</span></div>
+      <ol>
+        <li class="keep"><span class="tag">[user]</span><span>why does the binary die on every exec?</span></li>
+        <li class="drop"><span class="tag">Read</span><span>internal/forge/main.go (412 lines)</span></li>
+        <li class="err"><span class="tag">[tool-error]</span><span>make install -> exit 137 (killed)</span></li>
+        <li class="drop"><span class="tag">Grep</span><span>"ldflags" 31 matches</span></li>
+        <li class="drop"><span class="tag">Bash</span><span>ls build/ -> 14 files</span></li>
+        <li class="keep"><span class="tag">[assistant]</span><span>Cause proven: EDR kills stripped builds.</span></li>
+        <li class="drop"><span class="tag">thinking</span><span>4,210 tokens</span></li>
+        <li class="keep"><span class="tag">[user]</span><span>ok never strip these, note it</span></li>
+      </ol>
+      <div class="fact"><b>info</b> · never strip Go binaries here: EDR SIGKILLs stripped static builds (exit 137). <span class="mono">refs=3 (you 2, agent 1)</span></div>
+    </figure>
+  </div>
+
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button role="tab" id="t-what" aria-controls="what" aria-selected="true">What</button>
+    <button role="tab" id="t-why" aria-controls="why" aria-selected="false">Why</button>
+    <button role="tab" id="t-how" aria-controls="how" aria-selected="false">How</button>
+    <button role="tab" id="t-status" aria-controls="status" aria-selected="false">Status</button>
+  </nav>
+
+  <div class="panel" id="what" role="tabpanel" aria-labelledby="t-what">
+    <section>
+      <span class="eyebrow">What it is</span>
+      <h2>A shared memory that grows from your sessions, not from notes you write.</h2>
+      <p>A Claude Code mod. It reads each session after the fact, pulls out info (decisions, rules, root causes, gotchas), and keeps one copy of each piece with a list of the sessions that said it. Repos you put in one group share the same memory; worktrees count as their repo.</p>
+      <div class="two">
+<pre class="card"><span class="k">always seen</span>  this repo's top items
+  [i-41] PRs merge after CI + review + human go
+         <span class="v">refs=5 (you 5, agent 0) last=10-30</span>
+  topic payments/deploy (2 items, 3 refs)
+
+<span class="k">on demand</span>    memory_open("payments/deploy")
+  [i-12] deploys skip DB migrations; apply by hand
+         <span class="v">refs=2 (agent 2) last=10-21</span>
+
+<span class="k">proof</span>        memory_refs("i-12")
+  <span class="v">10-14 agent</span>  "the deploy job has no migrate step"
+  <span class="v">10-21 agent</span>  "migration not applied, ran it by hand"</pre>
+        <div>
+          <ul class="decisions">
+            <li><b>info</b><span>One line of text. No "fact" label: it is only as strong as its refs.</span></li>
+            <li><b>refs</b><span>Each session that said it, who said it (you or the agent), when, and a short quote.</span></li>
+            <li><b>topics</b><span>A tree per group. At most 30 entries per level, three levels deep.</span></li>
+            <li><b>tools</b><span><code>memory_open</code>, <code>memory_refs</code>, <code>memory_search</code>. Claude calls them on its own when a question touches a topic.</span></li>
+          </ul>
+          <p class="rule-line">No fixed bar for "true". Claude sees the count, who said it and when, and judges.</p>
+        </div>
+      </div>
+    </section>
+    <section>
+      <span class="eyebrow">Shared across repos</span>
+      <h2>Worktrees fold into their repo. Repos share a group.</h2>
+      <p>You name the groups. A lesson from one backend repo shows up in the others and stays out of unrelated work.</p>
+      <div class="groups">
+        <div class="pool"><div class="name">backend</div><div class="repos">payments · ledger · their worktrees</div></div>
+        <div class="pool"><div class="name">ai-tooling</div><div class="repos">agent service · dotfiles · mods</div></div>
+        <div class="pool"><div class="name">other</div><div class="repos">everything unmapped</div></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="panel" id="why" role="tabpanel" aria-labelledby="t-why" hidden>
+    <section>
+      <span class="eyebrow">Why</span>
+      <h2>The lessons are already in the transcripts. Nobody reads them again.</h2>
+      <div class="qa">
+        <div><b>Hand-written memory misses most of it</b><p>CLAUDE.md and memory files hold what someone stopped to write down. The rest of a session's lessons stay in a transcript nobody opens, and Claude Code deletes transcripts after 30 days by default.</p></div>
+        <div><b>One repo is too small</b><p>Built-in memory is per project folder. A rule set in one backend repo, or a worktree of it, never reaches the next repo where it applies.</p></div>
+        <div><b>Approving every item does not scale</b><p>A review queue for each extracted line turns into a chore and gets skipped. Instead, info earns weight by coming back: in 20 sampled sessions, one merge rule showed up in 5 of them under 5 different wordings.</p></div>
+        <div><b>Counts, not verdicts</b><p>A label like "fact" hides how sure anyone is. A ref list keeps the evidence: you said it five times, or the agent guessed it once. The model reading it can weigh that.</p></div>
+        <div><b>Context is expensive</b><p>Loading everything would crowd out the work. Only the top level is always visible; topics and proof load when a question needs them.</p></div>
+        <div><b>Reading is cheap</b><p>Text is under 1% of a transcript. The rest is tool output that is dropped before any model sees it, so one small model call per session is enough.</p></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="panel" id="how" role="tabpanel" aria-labelledby="t-how" hidden>
+    <section>
+      <span class="eyebrow">Pipeline</span>
+      <h2>Slice, extract, reconcile, file, serve.</h2>
+      <div class="flow">
+        <div><b>1 slice</b><span>Keep prompts, replies, summaries, failing commands. Drop reads, listings, thinking. Redact secrets.</span></div>
+        <div><b>2 extract</b><span>One model call lists the info in the new part of the session, each with who said it and the lines it came from.</span></div>
+        <div><b>3 reconcile</b><span>Match by meaning against what is stored: same info adds a ref, new info gets filed under a topic.</span></div>
+        <div><b>4 file</b><span>Append items and refs; split a topic past 30 entries. Then move the session's cursor.</span></div>
+        <div><b>5 serve</b><span>The next session gets the top level in the <code>memory_open</code> tool description and drills down from there.</span></div>
+      </div>
+    </section>
+    <section>
+      <span class="eyebrow">What gets read</span>
+      <h2>Almost all of a transcript is tool output. Almost none of it is memory.</h2>
+      <div class="ratio">
+        <div><div class="n">1,860 MB</div><div class="u">raw transcripts, 753 human sessions</div></div>
+        <div><div class="n">17.3 MB</div><div class="u">after the slicer, ~6k tokens per session</div></div>
+        <div><div class="n hl">0.9%</div><div class="u">of the bytes reach the extractor</div></div>
+      </div>
+      <div class="bars" aria-hidden="true">
+        <div class="row"><span>raw</span><div class="track"><div class="fill" style="width:100%"></div></div></div>
+        <div class="row"><span>sliced</span><div class="track"><div class="fill k" style="width:0.93%"></div></div></div>
+      </div>
+      <p class="foot">Measured on one machine's last 30 days of sessions. 633 automated SDK sessions skipped entirely.</p>
+    </section>
+    <section>
+      <span class="eyebrow">How refs are counted</span>
+      <h2>Your word counts. The agent echoing it back does not.</h2>
+      <ul class="decisions" style="margin-top:26px">
+        <li><b>ref</b><span>Same info from a new session. The count grows.</span></li>
+        <li><b>new</b><span>New info, filed under the topic it fits; existing topic names are reused.</span></li>
+        <li><b>echo</b><span>The agent repeating info it was just shown. Kept, not counted, so loaded info cannot inflate itself.</span></li>
+        <li><b>confirm</b><span>Claude states loaded info and you say OK: a ref from you.</span></li>
+        <li class="warn"><b>reject</b><span>You say no or correct it: an "against" ref, and the correction becomes its own item, linked as a conflict.</span></li>
+      </ul>
+    </section>
+    <section>
+      <span class="eyebrow">When it runs</span>
+      <h2>Inside the session, at the moments that matter.</h2>
+      <p>No daemon, no cron. The mod hooks the session itself and only reads what is new since its last pass.</p>
+      <div class="timeline">
+        <div class="ev"><code>turn.complete</code><p>Starts a 10 minute idle timer. A new turn cancels it. When it fires, the new part of the session is processed.</p></div>
+        <div class="ev"><code>session.compact</code><p><b>Flush before compaction.</b> Detail that the summary is about to drop gets read first.</p></div>
+        <div class="ev"><code>session.end</code><p>Exit, clear, worktree removal or handoff: the last turns are processed before the session goes.</p></div>
+        <div class="ev"><code>session.start</code><p>Sweeps sessions that died without an end event (crash, kill -9), one at a time under a lease.</p></div>
+      </div>
+    </section>
+    <section>
+      <span class="eyebrow">Guard rails</span>
+      <h2>Nothing leaves unredacted, nothing counts twice.</h2>
+      <div class="guards">
+        <div><h3>Secrets out first</h3><p>Keys, tokens, JWTs, private key blocks, <code>*_KEY=</code> lines and URL passwords are redacted in the slicer, before any text leaves the machine.</p></div>
+        <div><h3>You can undo</h3><p><code>/memory-forget</code> drops an item. It comes back only if you say it again.</p></div>
+        <div><h3>Run twice, write once</h3><p>Each processed slice is recorded with the write, so a retry skips it. A session votes once per item, so a stray re-run never adds weight.</p></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="panel" id="status" role="tabpanel" aria-labelledby="t-status" hidden>
+    <section>
+      <span class="eyebrow">Where it stands</span>
+      <h2>Built in the open, measured before it ships.</h2>
+      <ol class="roadmap">
+        <li><span>Keep transcripts for a year instead of 30 days</span><span class="pill done">done</span></li>
+        <li><span>Slicer with redaction, 24 tests</span><span class="pill done">done</span></li>
+        <li><span>Measure on 20 real sessions: 179 items, one user rule seen in 5 sessions</span><span class="pill done">done</span></li>
+        <li><span>Spike: mod tools Claude calls on its own, top level carried in the tool description</span><span class="pill done">done</span></li>
+        <li><span>Extract, reconcile and split into the info tree (library, 109 tests)</span><span class="pill done">done</span></li>
+        <li><span>Session hooks and the dead-session sweep</span><span class="pill">planned</span></li>
+        <li><span>Serve the tree: top level, drill-down tools, forget</span><span class="pill">planned</span></li>
+      </ol>
+    </section>
+  </div>
+
+  <footer>Session Memory is a Claude Code mod. Inspired by the Dewee memory design: know what is true, where it came from, and who has the final word.</footer>
+</div>
+<script>
+(() => {
+  const tabs = [...document.querySelectorAll('[role="tab"]')];
+  const show = id => {
+    if (!tabs.some(t => t.getAttribute('aria-controls') === id)) id = 'what';
+    tabs.forEach(t => {
+      const on = t.getAttribute('aria-controls') === id;
+      t.setAttribute('aria-selected', on);
+      t.tabIndex = on ? 0 : -1;
+      document.getElementById(t.getAttribute('aria-controls')).hidden = !on;
+    });
+  };
+  tabs.forEach((t, i) => {
+    t.addEventListener('click', () => { history.replaceState(null, '', '#' + t.getAttribute('aria-controls')); show(t.getAttribute('aria-controls')); });
+    t.addEventListener('keydown', e => {
+      const d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+      if (!d) return;
+      const n = tabs[(i + d + tabs.length) % tabs.length];
+      n.focus(); n.click();
+    });
+  });
+  show(location.hash.slice(1));
+})();
+</script>
+</body>
+</html>
