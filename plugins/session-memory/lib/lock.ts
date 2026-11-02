@@ -6,16 +6,17 @@ export type LockFs = {
   sleep(ms: number): Promise<void>
 }
 
-export type LockOptions = { staleMs?: number; waitMs?: number; stepMs?: number }
+export type LockOptions = { staleMs?: number; waitMs?: number; stepMs?: number; onStale?: (ageMs: number) => Promise<void> }
 
 export const BUSY = Symbol('busy')
 
 export async function withLock<T>(fs: LockFs, path: string, fn: () => Promise<T>, opts: LockOptions = {}): Promise<T | typeof BUSY> {
-  const { staleMs = 60_000, waitMs = 30_000, stepMs = 1_000 } = opts
+  const { staleMs = 60_000, waitMs = 30_000, stepMs = 1_000, onStale } = opts
   const deadline = fs.now() + waitMs
   while (!(await fs.mkdir(path))) {
     const mtime = await fs.mtime(path)
     if (mtime !== null && fs.now() - mtime > staleMs) {
+      await onStale?.(fs.now() - mtime)
       await fs.rmdir(path)
       continue
     }

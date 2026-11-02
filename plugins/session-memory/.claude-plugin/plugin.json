@@ -1,0 +1,27 @@
+{
+  "name": "session-memory",
+  "version": "0.1.0",
+  "description": "Mines every session for decisions, rules, root causes and gotchas, and files them in a topic tree per repo group, each item with the session quotes it came from",
+  "author": { "name": "llkhacquan" },
+  "license": "MIT",
+  "userConfig": {
+    "model": {
+      "type": "string",
+      "title": "Model",
+      "description": "Model that extracts and files memory items",
+      "default": "sonnet"
+    },
+    "dailyCalls": {
+      "type": "number",
+      "title": "Model calls per day",
+      "description": "Cap on extract and split calls per day; past it, work waits for the next day",
+      "default": 150
+    },
+    "sweepMax": {
+      "type": "number",
+      "title": "Transcripts per sweep",
+      "description": "How many unfinished transcripts a new session picks up in the background",
+      "default": 10
+    }
+  }
+}

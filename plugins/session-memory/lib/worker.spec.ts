@@ -21,7 +21,7 @@ function harness(records: TranscriptRecord[], opts: { answers?: Completion[]; ca
   }
   const answers = [...(opts.answers ?? [])]
   const prompts: string[] = []
-  const logs: string[] = []
+  const events: Record<string, unknown>[] = []
   let left = opts.calls ?? 100
   const reads: number[] = []
   const deps: WorkerDeps = {
@@ -32,11 +32,11 @@ function harness(records: TranscriptRecord[], opts: { answers?: Completion[]; ca
     locked: async fn => (opts.busy ? null : fn()),
     callsLeft: async () => left,
     spend: async () => void left--,
-    log: m => void logs.push(m),
+    event: async (ev, fields) => void events.push({ ev, ...fields }),
   }
   const items = () => (files.get(`${DIR}/items.jsonl`) ?? '').split('\n').filter(Boolean).map(l => JSON.parse(l) as Item)
   const processed = () => (files.get(`${DIR}/processed.jsonl`) ?? '').split('\n').filter(Boolean).map(l => JSON.parse(l))
-  return { deps, files, prompts, logs, reads, items, processed }
+  return { deps, files, prompts, events, reads, items, processed }
 }
 
 const job = (over: Partial<Job> = {}): Job => ({ sid: 's1', dir: DIR, group: 'payments', repo: 'api', trigger: 'end', loaded: [], date: '2026-11-02', ...over })
@@ -49,6 +49,14 @@ describe('processSession', () => {
     expect(out).toEqual({ stop: 'done', slices: 1, calls: 1, warn: undefined })
     expect(h.items().map(i => i.text)).toEqual(['deploys need a human go'])
     expect(h.processed()).toEqual([{ sid: 's1', from: 0, to: 6 }])
+  })
+
+  test('each model call reports what it changed and what it cost', async () => {
+    const h = harness(turns(3), { answers: [{ ...answer(newOp('deploys need a human go')), ms: 1200 }] })
+    await processSession(h.deps, job())
+    expect(h.events).toEqual([
+      { ev: 'slice', sid: 's1', from: 0, to: 6, turns: 3, cands: 0, in: 100, out: 20, ms: 1200, ops: { new: 1 }, items: [h.items()[0]!.id], skipped: [], errors: [] },
+    ])
   })
 
   test('a second run on the same transcript reads from the cursor and calls nothing', async () => {
@@ -83,7 +91,7 @@ describe('processSession', () => {
     const h = harness(turns(3), { answers: [{ error: 'api-error 529' }] })
     expect((await processSession(h.deps, job())).stop).toBe('model')
     expect(h.processed()).toEqual([])
-    expect(h.logs.join()).toContain('api-error 529')
+    expect(h.events).toEqual([{ ev: 'model-error', kind: 'reconcile', sid: 's1', from: 0, to: 6, error: 'api-error 529', ms: undefined }])
   })
 
   test('no calls left stops before the model', async () => {
@@ -96,6 +104,7 @@ describe('processSession', () => {
     const h = harness(turns(3), { busy: true, answers: [answer(newOp('x rule'))] })
     expect((await processSession(h.deps, job())).stop).toBe('busy')
     expect(h.files.size).toBe(0)
+    expect(h.events).toEqual([{ ev: 'busy', sid: 's1', from: 0, to: 6 }])
   })
 
   test('a group file over the cap is not read', async () => {

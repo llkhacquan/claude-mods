@@ -2,11 +2,11 @@ import type { Item, Ref } from './memory-types.ts'
 import { buildPrompt, parseOps } from './reconcile-prompt.ts'
 import { isHeadless, sliceRecords, type TranscriptRecord } from './slicer.ts'
 import { buildSplitPrompt, parseSplit } from './split-prompt.ts'
-import { applyOps, applySplit, canSplit, loadGroup, nodesOver, saveGroup, splitInput, type GroupState, type Processed, type StoreIO } from './store.ts'
+import { applyOps, applySplit, type ApplyResult, canSplit, loadGroup, nodesOver, saveGroup, splitInput, type GroupState, type Processed, type StoreIO } from './store.ts'
 
 export type Trigger = 'idle' | 'compact' | 'end' | 'sweep'
 
-export type Completion = { text: string; inTokens: number; outTokens: number } | { error: string }
+export type Completion = ({ text: string; inTokens: number; outTokens: number } | { error: string }) & { ms?: number }
 
 export type WorkerDeps = {
   io: StoreIO
@@ -16,7 +16,7 @@ export type WorkerDeps = {
   locked<T>(fn: () => Promise<T>): Promise<T | null>
   callsLeft(): Promise<number>
   spend(c: { inTokens: number; outTokens: number }): Promise<void>
-  log(msg: string): void
+  event(ev: string, fields: Record<string, unknown>): Promise<void>
 }
 
 export type Job = { sid: string; dir: string; group: string; repo: string; trigger: Trigger; loaded: string[]; date: string }
@@ -37,6 +37,12 @@ const GROUP_FILES = ['items.jsonl', 'nodes.json', 'processed.jsonl']
 
 export const cursorOf = (state: GroupState, sid: string): number =>
   state.processed.filter(p => p.sid === sid).reduce((max, p) => Math.max(max, p.to), 0)
+
+const countOps = (ops: { op: string }[]): Record<string, number> => {
+  const n: Record<string, number> = {}
+  for (const o of ops) n[o.op] = (n[o.op] ?? 0) + 1
+  return n
+}
 
 const words = (s: string): Set<string> => new Set(s.toLowerCase().match(/[a-z0-9][a-z0-9_-]{3,}/g) ?? [])
 
@@ -82,7 +88,10 @@ export async function processSession(deps: WorkerDeps, job: Job): Promise<Outcom
       await saveGroup(deps.io, job.dir, applied.state, applied.newRefs, slice)
       return { ...applied.state, processed: [...applied.state.processed, slice] }
     })
-    if (r === null) return false
+    if (r === null) {
+      await deps.event('busy', { sid: slice.sid, from: slice.from, to: slice.to })
+      return false
+    }
     state = r
     return true
   }
@@ -107,18 +116,29 @@ export async function processSession(deps: WorkerDeps, job: Job): Promise<Outcom
       const res = await deps.complete(system, user, RECONCILE_TOKENS)
       out.calls++
       if ('error' in res) {
-        deps.log(`reconcile ${job.sid} ${slice.from}-${slice.to}: ${res.error}`)
+        await deps.event('model-error', { kind: 'reconcile', sid: job.sid, from: slice.from, to: slice.to, error: res.error, ms: res.ms })
         return { ...out, stop: 'model' }
       }
       await deps.spend(res)
       const { ops, errors } = parseOps(res.text, ctx)
-      for (const e of errors) deps.log(`reconcile ${job.sid} ${slice.from}-${slice.to}: ${e}`)
-      const ok = await save(slice, fresh => {
-        const r = applyOps(fresh, ops, { sid: job.sid, date: job.date })
-        for (const sk of r.skipped) deps.log(`skip op ${sk.op.op}: ${sk.reason}`)
-        return r
-      })
+      const box: { applied?: ApplyResult } = {}
+      const ok = await save(slice, fresh => (box.applied = applyOps(fresh, ops, { sid: job.sid, date: job.date })))
       if (!ok) return { ...out, stop: 'busy' }
+      await deps.event('slice', {
+        sid: job.sid,
+        from: slice.from,
+        to: slice.to,
+        turns: s.humanTurns,
+        cands: ctx.candidates.length,
+        in: res.inTokens,
+        out: res.outTokens,
+        ms: res.ms,
+        ops: countOps(ops),
+        items: box.applied?.changedItems.map(i => i.id) ?? [],
+        skipped: box.applied?.skipped.map(sk => `${sk.op.op}: ${sk.reason}`) ?? [],
+        errors,
+        ...(box.applied ? {} : { dup: true }),
+      })
     } else if (!(await save(slice))) {
       return { ...out, stop: 'busy' }
     }
@@ -138,21 +158,20 @@ async function splitOver(deps: WorkerDeps, job: Job, state: GroupState): Promise
     const res = await deps.complete(system, user, SPLIT_TOKENS)
     calls++
     if ('error' in res) {
-      deps.log(`split ${node}: ${res.error}`)
+      await deps.event('model-error', { kind: 'split', node, error: res.error, ms: res.ms })
       continue
     }
     await deps.spend(res)
-    await deps.locked(async () => {
+    const r = await deps.locked(async () => {
       const fresh = await loadGroup(deps.io, job.dir)
-      if (!nodesOver(fresh).includes(node) || !canSplit(fresh, node)) return
+      if (!nodesOver(fresh).includes(node) || !canSplit(fresh, node)) return { error: 'no longer over' }
       const input = splitInput(fresh, node)
       const parsed = parseSplit(res.text, input, new Set(fresh.nodes.map(n => n.id)))
-      if ('error' in parsed) {
-        deps.log(`split ${node}: ${parsed.error}`)
-        return
-      }
+      if ('error' in parsed) return parsed
       await saveGroup(deps.io, job.dir, applySplit(fresh, node, parsed.groups).state, [])
+      return { children: parsed.groups.map(g => g.id) }
     })
+    await deps.event('split', { node, in: res.inTokens, out: res.outTokens, ms: res.ms, ...(r ?? { error: 'busy' }) })
   }
   return calls
 }

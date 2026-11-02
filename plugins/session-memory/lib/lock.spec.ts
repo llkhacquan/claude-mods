@@ -39,7 +39,9 @@ describe('withLock', () => {
     const { fs, held, advance } = fakeFs()
     held.set('/g/.lock', fs.now())
     advance(61_000)
-    expect(await withLock(fs, '/g/.lock', async () => 'ran')).toBe('ran')
+    const ages: number[] = []
+    expect(await withLock(fs, '/g/.lock', async () => 'ran', { onStale: async age => void ages.push(age) })).toBe('ran')
+    expect(ages).toEqual([61_000])
   })
 
   test('waits for a holder that frees the lock in time', async () => {
