@@ -150,7 +150,7 @@ test('the events log tells why a run did or did not happen and what it cost', as
   await h.clock.advance(10 * MIN)
   const evs = h.events().map(({ ts, ...rest }) => rest)
   expect(evs.map(e => e.ev)).toEqual(['start', 'tools', 'sweep', 'slice', 'job', 'tools', 'skip'])
-  expect(evs[0]).toEqual({ by: SID, ev: 'start', cwd: CWD, group: 'be', model: 'sonnet', dailyCalls: 150, sweepMax: 10, autoGroups: true })
+  expect(evs[0]).toEqual({ by: SID, ev: 'start', cwd: CWD, group: 'be', model: 'sonnet', dailyCalls: 150, sweepMax: 10, autoGroups: true, jevModel: 'jev-1.13', nudgeMin: 0.8, jev: false })
   expect(evs[3]).toMatchObject({ ev: 'slice', sid: SID, from: 0, to: 6, turns: 3, in: 900, out: 40, ops: { new: 1 }, skipped: [], errors: [] })
   expect(evs[4]).toMatchObject({ ev: 'job', trigger: 'idle', sid: SID, group: 'be', stop: 'done', slices: 1, calls: 1 })
   expect(evs[6]).toEqual({ by: SID, ev: 'skip', trigger: 'idle', sid: SID, why: 'debounce' })
@@ -562,4 +562,72 @@ test('/memory-backfill stops at the sweep share of dailyCalls', { options: { swe
   await h.clock.settle()
   expect(h.prompts).toHaveLength(2)
   expect(await backfillCmd($)).toContain('used up')
+})
+
+const HSM_ITEM = { id: 'i-1', node: 'be', text: 'GKE pods cannot reach the yubihsm connector on the mac mini', type: 'gotcha', refs: { user: 1, agent: 0, against: 0, echo: 0 }, voters: { user: ['older'], agent: [], against: [], echo: [] }, first: '2026-11-01', last: '2026-11-01', conflicts_with: [], dead: false }
+
+function nudgeFixture(on: On, pYes: number) {
+  const h = harness(on, { files: { [`${STATE}/be/items.jsonl`]: `${JSON.stringify(HSM_ITEM)}\n`, [`${STATE}/be/nodes.json`]: JSON.stringify([{ id: 'be', parent: null, title: 'be' }]) } })
+  const jev: string[] = []
+  on('http.fetch', ($, e) => {
+    jev.push(String(e.init?.body ?? ''))
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ answers: { v: { choice: pYes >= 0.5 ? 'YES' : 'NO', probabilities: { YES: pYes, NO: 1 - pYes } } } }) } }
+  })
+  on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
+  on('tool.call', () => ({ result: 'ok' }))
+  on('turn.step', async function* ($, e) {
+    return { turnId: e.turnId, index: e.index, answer: STEP_ANSWER.text, toolUses: [], stopReason: 'end_turn', usage: null }
+  })
+  return { h, jev }
+}
+
+const STEP_ANSWER = { text: '' }
+const submit = async ($: Engine, text: string) => (await $.prompt.submit({ text } as never)) as { context?: string[] }
+const bash = async ($: Engine) => (await $.tool.call({ tool: 'Bash', command: 'ls' } as never)) as { context?: string[] }
+async function step($: Engine, answer: string) {
+  STEP_ANSWER.text = answer
+  const s = $.turn.step({ turnId: 't1', index: 0, model: 'sonnet', messageCount: 1 } as never)
+  for await (const _ of s);
+  await s.result
+}
+
+test('a prompt that matches an item Jev calls relevant gets a memory_search nudge', { options: { jevKey: 'sk-or-test-secret' } }, async ($, on) => {
+  const { h, jev } = nudgeFixture(on, 0.93)
+  await start($)
+  await h.clock.settle()
+  const r = await submit($, 'why can the GKE pod not reach the yubihsm connector?')
+  expect(r.context?.[0]).toContain('topic be: i-1')
+  expect(jev).toHaveLength(1)
+  expect(JSON.parse(jev[0]!).state.memory_item).toBe(HSM_ITEM.text)
+  expect(h.events().find(e => e.ev === 'nudge')).toMatchObject({ src: 'user', topic: 'be', p: 0.93, sent: true })
+  expect((await submit($, 'yubihsm connector again')).context).toBeUndefined()
+  expect(h.files.get(`${STATE}/events.jsonl`)).not.toContain('sk-or-test-secret')
+  expect(h.events().find(e => e.ev === 'start')).toMatchObject({ jev: true })
+})
+
+test('a match Jev calls unrelated sends nothing but is logged', { options: { jevKey: 'sk-or-test-secret' } }, async ($, on) => {
+  const { h } = nudgeFixture(on, 0.2)
+  await start($)
+  await h.clock.settle()
+  expect((await submit($, 'why can the GKE pod not reach the yubihsm connector?')).context).toBeUndefined()
+  expect(h.events().find(e => e.ev === 'nudge')).toMatchObject({ p: 0.2, sent: false })
+})
+
+test('a match in the model text rides on the next tool result, once', { options: { jevKey: 'sk-or-test-secret' } }, async ($, on) => {
+  const { h } = nudgeFixture(on, 0.93)
+  await start($)
+  await h.clock.settle()
+  await step($, 'Checking whether the yubihsm connector is reachable from GKE.')
+  await h.clock.settle()
+  expect((await bash($)).context?.[0]).toContain('memory_search')
+  expect((await bash($)).context).toBeUndefined()
+  expect(h.events().find(e => e.ev === 'nudge')).toMatchObject({ src: 'assistant', sent: true })
+})
+
+test('no jevKey means no nudge and no Jev call', async ($, on) => {
+  const { h, jev } = nudgeFixture(on, 0.93)
+  await start($)
+  await h.clock.settle()
+  expect((await submit($, 'why can the GKE pod not reach the yubihsm connector?')).context).toBeUndefined()
+  expect(jev).toHaveLength(0)
 })

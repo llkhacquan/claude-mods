@@ -28,6 +28,25 @@
       "title": "Auto groups",
       "description": "File a git repo no rule covers into a group with one model call",
       "default": true
+    },
+    "jevKey": {
+      "type": "string",
+      "title": "OpenRouter key for recall nudges",
+      "description": "Key for Jev (OpenRouter /v1/systemone), which judges whether a matched memory item fits the conversation. Empty turns nudges off",
+      "sensitive": true,
+      "default": ""
+    },
+    "jevModel": {
+      "type": "string",
+      "title": "Jev model",
+      "description": "Jev model id for the nudge judge",
+      "default": "jev-1.13"
+    },
+    "nudgeMin": {
+      "type": "number",
+      "title": "Nudge threshold",
+      "description": "Jev YES probability at or above which the agent is told to call memory_search",
+      "default": 0.8
     }
   }
 }
