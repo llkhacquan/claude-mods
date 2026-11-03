@@ -18,6 +18,7 @@ export type Item = {
   last: string
   conflicts_with: string[]
   dead: boolean
+  repos?: string[]
 }
 
 export type Ref = {

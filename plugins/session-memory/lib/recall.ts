@@ -28,8 +28,8 @@ function ancestors(nodes: Node[], id: string): Node[] {
   return out
 }
 
-const inRepo = (nodes: Node[], node: string, repo: string) =>
-  !!repo && ancestors(nodes, node).some(n => n.title === repo || n.id.split('/').pop() === repo)
+const inRepo = (nodes: Node[], it: Item, repo: string) =>
+  !!repo && (!!it.repos?.includes(repo) || ancestors(nodes, it.node).some(n => n.title === repo || n.id.split('/').pop() === repo))
 
 function topicLines(state: GroupState): string[] {
   const stats = new Map<string, { items: number; refs: number; last: string }>()
@@ -44,7 +44,7 @@ function topicLines(state: GroupState): string[] {
 }
 
 export function buildL0(state: GroupState, repo: string, intro: string, cap = DESCRIPTION_CAP): { text: string; loaded: string[] } {
-  const items = live(state).sort((a, b) => Number(inRepo(state.nodes, b.node, repo)) - Number(inRepo(state.nodes, a.node, repo)) || rank(a, b))
+  const items = live(state).sort((a, b) => Number(inRepo(state.nodes, b, repo)) - Number(inRepo(state.nodes, a, repo)) || rank(a, b))
   const topics = topicLines(state)
   const head = [intro, HEADER(state.group), items.length ? `Top items${repo ? ` (${repo} first)` : ''}:` : 'No items yet.']
   const tail = topics.length ? ['Topics:', ...topics] : []

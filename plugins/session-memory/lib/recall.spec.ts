@@ -48,6 +48,12 @@ describe('buildL0', () => {
     expect(l0.loaded).toEqual(['i-1', 'i-2'])
   })
 
+  test('an item referenced from this repo comes first even under another topic', () => {
+    const fromApi = { ...web, id: 'i-4', refs: { user: 1, agent: 0, against: 0, echo: 0 }, repos: ['api'] }
+    const l0 = buildL0(state([web, fromApi]), 'api', 'Open a topic.')
+    expect(l0.loaded).toEqual(['i-4', 'i-2'])
+  })
+
   test('drops the lowest-ranked items to stay under the cap', () => {
     const many = Array.from({ length: 200 }, (_, i) => item(`i-${i + 10}`, 'be/web', `rule number ${i} about caching layers and builds`))
     const l0 = buildL0(state(many), 'api', 'Open a topic.')

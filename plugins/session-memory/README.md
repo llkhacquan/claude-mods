@@ -65,7 +65,7 @@ Each slice of a transcript goes to the model once. The record of what was mined 
 `~/.local/state/session-memory/<group>/`:
 
 - `nodes.json`: the topic tree
-- `items.jsonl`: one item per line, with vote counts per session
+- `items.jsonl`: one item per line, with vote counts per session and the repos whose sessions referenced it
 - `refs/YYYY-MM.jsonl`: the quotes behind each item, one shard per month
 - `processed.jsonl`: transcript ranges already mined
 
@@ -83,7 +83,7 @@ An interactive session in a group gets three tools:
 | `memory_search` | key words | the best 20 item lines of the group, matched on item text and topic titles |
 | `memory_refs` | item id | the item and each session quote behind it |
 
-The `memory_open` description carries the group's top items (this repo first) and its topics, cut to fit the 4096-char tool description limit, so the model sees them without a call. It is registered again after the session's own run changes the group. Items the session has seen this way count as echo when it repeats them, not as new votes.
+The `memory_open` description carries the group's top items (first the ones under this repo's node or referenced from a session in this repo) and its topics, cut to fit the 4096-char tool description limit, so the model sees them without a call. It is registered again after the session's own run changes the group. Items the session has seen this way count as echo when it repeats them, not as new votes.
 
 `/memory-forget <item-id>` hides a wrong item: it is gone from the three tools and the description at once. It is kept on disk, and a later ref from the user (not the agent) brings it back.
 

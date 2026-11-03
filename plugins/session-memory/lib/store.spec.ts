@@ -87,6 +87,14 @@ describe('applyOps single ops', () => {
     expect(r.state.items.get('i-1')).toMatchObject({ refs: { user: 1, agent: 1, against: 0, echo: 0 }, first: '2026-01-10', last: '2026-02-01' })
   })
 
+  test('records each repo whose session referenced the item, once', async () => {
+    const a = applyOps(await empty(), [newItem()], { ...ctx(), repo: 'api' })
+    const b = applyOps(a.state, [{ op: 'ref', item: 'i-1', ref: ref() }], { ...ctx('s2'), repo: 'web' })
+    const c = applyOps(b.state, [{ op: 'ref', item: 'i-1', ref: ref() }], { ...ctx('s3'), repo: 'api' })
+    expect(c.state.items.get('i-1')?.repos).toEqual(['api', 'web'])
+    expect(a.state.items.get('i-1')?.repos).toEqual(['api'])
+  })
+
   test('ref to unknown item is skipped with a reason', async () => {
     const r = applyOps(await empty(), [{ op: 'ref', item: 'i-9', ref: ref() }], ctx())
     expect(r.skipped).toHaveLength(1)

@@ -139,7 +139,7 @@ export async function processSession(deps: WorkerDeps, job: Job): Promise<Outcom
       }
       const { ops, errors } = parseOps(res.text, ctx)
       const box: { applied?: ApplyResult } = {}
-      saved = await save(slice, fresh => (box.applied = applyOps(fresh, ops, { sid: job.sid, date: job.date })))
+      saved = await save(slice, fresh => (box.applied = applyOps(fresh, ops, { sid: job.sid, date: job.date, repo: job.repo })))
       if (saved === 'busy') return { ...out, stop: 'busy' }
       await deps.event('slice', {
         sid: job.sid,

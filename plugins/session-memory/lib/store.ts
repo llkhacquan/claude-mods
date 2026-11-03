@@ -17,7 +17,7 @@ export type GroupState = {
 
 export type Processed = { sid: string; from: number; to: number }
 
-export type ApplyContext = { sid: string; date: string }
+export type ApplyContext = { sid: string; date: string; repo?: string }
 export type Skipped = { op: Op; reason: string }
 export type ApplyResult = { state: GroupState; newRefs: Ref[]; changedItems: Item[]; skipped: Skipped[] }
 
@@ -154,6 +154,7 @@ export function applyOps(state: GroupState, ops: Op[], ctx: ApplyContext): Apply
     refKeys.add(key)
     newRefs.push(full)
     if (ctx.date > item.last) item.last = ctx.date
+    if (ctx.repo && !item.repos?.includes(ctx.repo)) item.repos = [...(item.repos ?? []), ctx.repo]
     const bucket = bucketOf(full)
     if (bucket === 'user') item.dead = false
     if (item.voters[bucket].includes(ctx.sid)) return
