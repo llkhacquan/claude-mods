@@ -1,4 +1,5 @@
 import type { Item } from './memory-types.ts'
+import { redact } from './slicer.ts'
 import type { GroupState } from './store.ts'
 
 export const JEV_URL = 'https://openrouter.ai/api/v1/systemone'
@@ -36,7 +37,7 @@ export function nudgeCandidates(state: GroupState, text: string, skip: NudgeSkip
 export function jevBody(model: string, context: string, item: Item): string {
   return JSON.stringify({
     model,
-    state: { context: context.slice(0, CONTEXT_MAX), memory_item: item.text },
+    state: { context: redact(context).slice(0, CONTEXT_MAX), memory_item: item.text },
     questions: {
       v: {
         type: 'choice',

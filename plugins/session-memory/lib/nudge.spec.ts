@@ -60,6 +60,13 @@ describe('jev', () => {
     expect(Object.keys(b.questions.v.criteria)).toEqual(['YES', 'NO'])
   })
 
+  test('secrets in the context are redacted before they leave the machine', () => {
+    const key = `sk-or-v1-${'a'.repeat(40)}`
+    const b = JSON.parse(jevBody('jev-1.13', `use ${key} for yubihsm`, hsm))
+    expect(b.state.context).not.toContain(key)
+    expect(b.state.context).toContain('[redacted]')
+  })
+
   test('reads the YES probability, null on anything else', () => {
     expect(jevYes(JSON.stringify({ answers: { v: { choice: 'YES', probabilities: { YES: 0.91, NO: 0.09 } } } }))).toBe(0.91)
     expect(jevYes(JSON.stringify({ error: { message: 'bad key' } }))).toBeNull()
