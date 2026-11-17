@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { Item, Node } from './memory-types.ts'
-import { jevBody, jevYes, nudgeCandidates, nudgeText } from './nudge.ts'
+import { judgeBody, judgeYes, nudgeCandidates, nudgeText } from './nudge.ts'
 import type { GroupState } from './store.ts'
 
 const item = (id: string, node: string, text: string, over: Partial<Item> = {}): Item => ({
@@ -52,25 +52,36 @@ describe('nudgeCandidates', () => {
   })
 })
 
-describe('jev', () => {
-  test('the request carries the context and the item text', () => {
-    const b = JSON.parse(jevBody('jev-1.13', 'ctx text', hsm))
+describe('judge', () => {
+  test('the jev request carries the context and the item text', () => {
+    const b = JSON.parse(judgeBody('jev', 'jev-1.13', 'ctx text', hsm))
     expect(b.model).toBe('jev-1.13')
     expect(b.state).toEqual({ context: 'ctx text', memory_item: hsm.text })
     expect(Object.keys(b.questions.v.criteria)).toEqual(['YES', 'NO'])
   })
 
+  test('the clef request names the workers model and wraps the same question in input', () => {
+    const b = JSON.parse(judgeBody('clef', 'clef', 'ctx text', hsm))
+    expect(b.model).toBe('@cf/cloudflare/clef')
+    expect(b.input.model).toBe('clef')
+    expect(b.input.state).toEqual({ context: 'ctx text', memory_item: hsm.text })
+    expect(Object.keys(b.input.questions.v.criteria)).toEqual(['YES', 'NO'])
+  })
+
   test('secrets in the context are redacted before they leave the machine', () => {
     const key = `sk-or-v1-${'a'.repeat(40)}`
-    const b = JSON.parse(jevBody('jev-1.13', `use ${key} for yubihsm`, hsm))
+    const b = JSON.parse(judgeBody('jev', 'jev-1.13', `use ${key} for yubihsm`, hsm))
     expect(b.state.context).not.toContain(key)
     expect(b.state.context).toContain('[redacted]')
   })
 
   test('reads the YES probability, null on anything else', () => {
-    expect(jevYes(JSON.stringify({ answers: { v: { choice: 'YES', probabilities: { YES: 0.91, NO: 0.09 } } } }))).toBe(0.91)
-    expect(jevYes(JSON.stringify({ error: { message: 'bad key' } }))).toBeNull()
-    expect(jevYes('not json')).toBeNull()
+    const answers = { v: { choice: 'YES', probabilities: { YES: 0.91, NO: 0.09 } } }
+    expect(judgeYes('jev', JSON.stringify({ answers }))).toBe(0.91)
+    expect(judgeYes('clef', JSON.stringify({ result: { model: 'clef', answers }, success: true }))).toBe(0.91)
+    expect(judgeYes('clef', JSON.stringify({ answers }))).toBeNull()
+    expect(judgeYes('jev', JSON.stringify({ error: { message: 'bad key' } }))).toBeNull()
+    expect(judgeYes('jev', 'not json')).toBeNull()
   })
 })
 

@@ -2,7 +2,6 @@ import type { Item } from './memory-types.ts'
 import { redact } from './slicer.ts'
 import type { GroupState } from './store.ts'
 
-export const JEV_URL = 'https://openrouter.ai/api/v1/systemone'
 const MIN_SHARED = 2
 const MAX_DF = 8
 const MAX_CANDIDATES = 3
@@ -34,9 +33,15 @@ export function nudgeCandidates(state: GroupState, text: string, skip: NudgeSkip
   return out.sort((a, b) => b.shared.length - a.shared.length).slice(0, MAX_CANDIDATES)
 }
 
-export function jevBody(model: string, context: string, item: Item): string {
-  return JSON.stringify({
-    model,
+export type Judge = 'jev' | 'clef'
+// replay of 60 hand-labeled nudges: jev at 0.85 => 8/9 right, clef at 0.7 => 8/10; clef-flash ~50% at any cut
+export const JUDGES: Record<Judge, { url: string; model: string; min: number }> = {
+  jev: { url: 'https://openrouter.ai/api/v1/systemone', model: 'jev-1.13', min: 0.8 },
+  clef: { url: '', model: 'clef', min: 0.7 },
+}
+
+export function judgeBody(judge: Judge, model: string, context: string, item: Item): string {
+  const ask = {
     state: { context: redact(context).slice(0, CONTEXT_MAX), memory_item: item.text },
     questions: {
       v: {
@@ -48,12 +53,16 @@ export function jevBody(model: string, context: string, item: Item): string {
         },
       },
     },
-  })
+  }
+  return JSON.stringify(judge === 'clef' ? { model: `@cf/cloudflare/${model}`, input: { model, ...ask } } : { model, ...ask })
 }
 
-export function jevYes(body: string): number | null {
+type Answers = { answers?: { v?: { probabilities?: { YES?: unknown } } } }
+
+export function judgeYes(judge: Judge, body: string): number | null {
   try {
-    const p = (JSON.parse(body) as { answers?: { v?: { probabilities?: { YES?: unknown } } } }).answers?.v?.probabilities?.YES
+    const parsed = JSON.parse(body) as Answers & { result?: Answers }
+    const p = (judge === 'clef' ? parsed.result : parsed)?.answers?.v?.probabilities?.YES
     return typeof p === 'number' ? p : null
   } catch {
     return null

@@ -59,9 +59,11 @@ Each slice of a transcript goes to the model once. The record of what was mined 
 | `dailyCalls` | `150` | model calls per day, failed ones included; past it, work waits for the next day. The start sweep gets at most a third; idle, compact and clear runs keep the rest |
 | `sweepMax` | `10` | transcripts one session start picks up |
 | `autoGroups` | `true` | file unlisted git repos into a group with one model call |
-| `jevKey` | empty | OpenRouter key for the recall nudge judge (kept in secure storage); empty turns nudges off |
-| `jevModel` | `jev-1.13` | Jev model id |
-| `nudgeMin` | `0.8` | Jev YES probability at or above which a nudge is sent |
+| `judge` | `jev` | recall nudge judge: `jev` (OpenRouter) or `clef` (Cloudflare Workers AI through a gateway) |
+| `judgeUrl` | per judge | `jev`: OpenRouter `/v1/systemone`. `clef`: your gateway's `/v1/run` URL; empty keeps nudges off |
+| `judgeKey` | empty | bearer key for `judgeUrl` (kept in secure storage); empty turns nudges off |
+| `judgeModel` | per judge | `jev-1.13` for `jev`, `clef` for `clef` |
+| `nudgeMin` | per judge | YES probability at or above which a nudge is sent: `0.8` for `jev`, `0.7` for `clef` |
 
 ## Files
 
@@ -92,13 +94,13 @@ The `memory_open` description carries the group's top items (first the ones unde
 
 ### Recall nudge
 
-Agents rarely call the memory tools on their own, so with `jevKey` set the mod points them at a topic when the conversation touches it:
+Agents rarely call the memory tools on their own, so with `judgeKey` set the mod points them at a topic when the conversation touches it:
 
 1. Your prompt, and the main agent's text at each step (not tool input or output), is matched against live items: an item is a candidate when it shares at least 2 terms that few items carry. Items this session voted on, and topics it already searched or was nudged about, are skipped.
-2. The best candidate goes to Jev (TypeSafe System One via OpenRouter `/v1/systemone`), which answers YES/NO with a probability: does this note fit what the conversation is working on?
-3. At `nudgeMin` or above, the agent gets a one-line note naming the topic, its item ids and a ready `memory_search` query. A match in your prompt rides on that prompt (the mod waits up to 2 s for Jev). A match in the agent's text rides on its next tool result, or your next prompt if the turn ends first.
+2. The best candidate goes to the judge, which answers YES/NO with a probability: does this note fit what the conversation is working on? Both judges take the same question: `jev` (TypeSafe System One) at OpenRouter `/v1/systemone`, and `clef` (Cloudflare Workers AI model `@cf/cloudflare/clef`) through a gateway that takes `{"model": "@cf/cloudflare/clef", "input": {...}}` at `/v1/run` and answers in `result`.
+3. At `nudgeMin` or above, the agent gets a one-line note naming the topic, its item ids and a ready `memory_search` query. The prompt never waits for the judge: a match in your prompt or the agent's text rides on the agent's next tool result, or your next prompt if the turn ends first.
 
-Each topic is nudged at most once per session, with at most 200 Jev calls per session. A replay over two days of real sessions found the term match alone right about 1 time in 5; with Jev at 0.85 it was right 8 times in 9, at about $0.00002 per call.
+Each topic is nudged at most once per session, with at most 200 judge calls per session. After a failed call (a 429, any other error status, or a reply it cannot read) the judge is left alone for a minute. A replay over two days of real sessions found the term match alone right about 1 time in 5. On 60 hand-labeled candidates from it, `jev` at 0.85 was right 8 times in 9 (about $0.00002 per call) and `clef` at 0.7 8 times in 10; `clef-flash` was right about half the time at any threshold.
 
 ## Debugging
 
@@ -106,7 +108,7 @@ Every run appends one JSON line per event to `~/.local/state/session-memory/even
 
 | `ev` | When | Fields |
 |---|---|---|
-| `start` | an interactive session starts | `cwd`, `group`, options (`jev` says whether a key is set; the key is never logged) |
+| `start` | an interactive session starts | `cwd`, `group`, options (`judgeKey` says whether a key is set; the key is never logged) |
 | `autogroup` | an unlisted repo is filed | `root`, `action`, `group`, `why`, `written` (`written`, `exists`, `busy`), `in`, `out`, `ms`, or `error` |
 | `sweep` | the start sweep or one backfill group ends | `found`, `picked`, `done`, `stop` (`all`, `max`, `cap`, `model`) |
 | `give-up` | a transcript failed 3 sweeps; skipped until it grows | `sid`, `group`, `fails` |
@@ -117,7 +119,7 @@ Every run appends one JSON line per event to `~/.local/state/session-memory/even
 | `tools` | the memory tools are registered | `l0Chars`, `l0Items` |
 | `recall` | a memory tool is called | `tool`, `arg`, `items`, `chars` |
 | `forget` | `/memory-forget` hid an item | `group`, `item` |
-| `nudge` | Jev judged a candidate | `src` (`user`, `assistant`), `topic`, `items`, `shared`, `p`, `sent`, `ms`, or `status` / `error` |
+| `nudge` | the judge was asked about a candidate | `src` (`user`, `assistant`), `topic`, `items`, `shared`, `p`, `sent`, `ms`, or `status` / `error` |
 | `skip` | a trigger did nothing | `why` (`debounce`, `group skip`, `no transcript`, `claimed` by another session's sweep, `cap` for an autogroup call) |
 | `model-error` | a model call failed; `kind` is `reconcile`, `split` or `parse` (no ops JSON, `error` holds the reply head) | `kind`, `error` |
 | `busy`, `lock-stale`, `fail` | something went wrong | the error, with `sid`, `group` or `path` when known |

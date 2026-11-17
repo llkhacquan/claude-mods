@@ -29,24 +29,35 @@
       "description": "File a git repo no rule covers into a group with one model call",
       "default": true
     },
-    "jevKey": {
+    "judge": {
       "type": "string",
-      "title": "OpenRouter key for recall nudges",
-      "description": "Key for Jev (OpenRouter /v1/systemone), which judges whether a matched memory item fits the conversation. Empty turns nudges off",
+      "title": "Nudge judge",
+      "description": "Model that decides whether a matched memory item fits the conversation: jev (OpenRouter /v1/systemone) or clef (Cloudflare Workers AI, through a gateway that takes {model, input} at /v1/run)",
+      "default": "jev"
+    },
+    "judgeUrl": {
+      "type": "string",
+      "title": "Judge URL",
+      "description": "Endpoint for the judge. Empty: OpenRouter for jev; clef needs your gateway's /v1/run URL",
+      "default": ""
+    },
+    "judgeKey": {
+      "type": "string",
+      "title": "Judge key",
+      "description": "Bearer key for the judge URL. Empty turns nudges off",
       "sensitive": true,
       "default": ""
     },
-    "jevModel": {
+    "judgeModel": {
       "type": "string",
-      "title": "Jev model",
-      "description": "Jev model id for the nudge judge",
-      "default": "jev-1.13"
+      "title": "Judge model",
+      "description": "Empty: jev-1.13 for jev, clef for clef",
+      "default": ""
     },
     "nudgeMin": {
       "type": "number",
       "title": "Nudge threshold",
-      "description": "Jev YES probability at or above which the agent is told to call memory_search",
-      "default": 0.8
+      "description": "Judge YES probability at or above which the agent is told to call memory_search. Empty: 0.8 for jev, 0.7 for clef"
     }
   }
 }

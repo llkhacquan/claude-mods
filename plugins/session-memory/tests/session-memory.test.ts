@@ -150,7 +150,7 @@ test('the events log tells why a run did or did not happen and what it cost', as
   await h.clock.advance(10 * MIN)
   const evs = h.events().map(({ ts, ...rest }) => rest)
   expect(evs.map(e => e.ev)).toEqual(['start', 'tools', 'sweep', 'slice', 'job', 'tools', 'skip'])
-  expect(evs[0]).toEqual({ by: SID, ev: 'start', cwd: CWD, group: 'be', model: 'sonnet', dailyCalls: 150, sweepMax: 10, autoGroups: true, jevModel: 'jev-1.13', nudgeMin: 0.8, jev: false })
+  expect(evs[0]).toEqual({ by: SID, ev: 'start', cwd: CWD, group: 'be', model: 'sonnet', dailyCalls: 150, sweepMax: 10, autoGroups: true, judge: 'jev', judgeUrl: 'https://openrouter.ai/api/v1/systemone', judgeModel: 'jev-1.13', nudgeMin: 0.8, judgeKey: false })
   expect(evs[3]).toMatchObject({ ev: 'slice', sid: SID, from: 0, to: 6, turns: 3, in: 900, out: 40, ops: { new: 1 }, skipped: [], errors: [] })
   expect(evs[4]).toMatchObject({ ev: 'job', trigger: 'idle', sid: SID, group: 'be', stop: 'done', slices: 1, calls: 1 })
   expect(evs[6]).toEqual({ by: SID, ev: 'skip', trigger: 'idle', sid: SID, why: 'debounce' })
@@ -566,19 +566,26 @@ test('/memory-backfill stops at the sweep share of dailyCalls', { options: { swe
 
 const HSM_ITEM = { id: 'i-1', node: 'be', text: 'GKE pods cannot reach the yubihsm connector on the mac mini', type: 'gotcha', refs: { user: 1, agent: 0, against: 0, echo: 0 }, voters: { user: ['older'], agent: [], against: [], echo: [] }, first: '2026-11-01', last: '2026-11-01', conflicts_with: [], dead: false }
 
-function nudgeFixture(on: On, pYes: number) {
+type JudgeReply = { status: number; body: unknown }
+const answers = (pYes: number) => ({ answers: { v: { choice: pYes >= 0.5 ? 'YES' : 'NO', probabilities: { YES: pYes, NO: 1 - pYes } } } })
+
+function nudgeFixture(on: On, reply: number | JudgeReply[]) {
   const h = harness(on, { files: { [`${STATE}/be/items.jsonl`]: `${JSON.stringify(HSM_ITEM)}\n`, [`${STATE}/be/nodes.json`]: JSON.stringify([{ id: 'be', parent: null, title: 'be' }]) } })
-  const jev: string[] = []
+  const bodies: string[] = []
+  const urls: string[] = []
+  const replies = typeof reply === 'number' ? [] : [...reply]
   on('http.fetch', ($, e) => {
-    jev.push(String(e.init?.body ?? ''))
-    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ answers: { v: { choice: pYes >= 0.5 ? 'YES' : 'NO', probabilities: { YES: pYes, NO: 1 - pYes } } } }) } }
+    bodies.push(String(e.init?.body ?? ''))
+    urls.push(String(e.url))
+    const r = typeof reply === 'number' ? { status: 200, body: answers(reply) } : (replies.shift() ?? { status: 500, body: {} })
+    return { value: { status: r.status, ok: r.status < 300, headers: {}, text: JSON.stringify(r.body) } }
   })
   on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
   on('tool.call', () => ({ result: 'ok' }))
   on('turn.step', async function* ($, e) {
     return { turnId: e.turnId, index: e.index, answer: STEP_ANSWER.text, toolUses: [], stopReason: 'end_turn', usage: null }
   })
-  return { h, jev }
+  return { h, bodies, urls }
 }
 
 const STEP_ANSWER = { text: '' }
@@ -591,29 +598,32 @@ async function step($: Engine, answer: string) {
   await s.result
 }
 
-test('a prompt that matches an item Jev calls relevant gets a memory_search nudge', { options: { jevKey: 'sk-or-test-secret' } }, async ($, on) => {
-  const { h, jev } = nudgeFixture(on, 0.93)
-  await start($)
-  await h.clock.settle()
-  const r = await submit($, 'why can the GKE pod not reach the yubihsm connector?')
-  expect(r.context?.[0]).toContain('topic be: i-1')
-  expect(jev).toHaveLength(1)
-  expect(JSON.parse(jev[0]!).state.memory_item).toBe(HSM_ITEM.text)
-  expect(h.events().find(e => e.ev === 'nudge')).toMatchObject({ src: 'user', topic: 'be', p: 0.93, sent: true })
-  expect((await submit($, 'yubihsm connector again')).context).toBeUndefined()
-  expect(h.files.get(`${STATE}/events.jsonl`)).not.toContain('sk-or-test-secret')
-  expect(h.events().find(e => e.ev === 'start')).toMatchObject({ jev: true })
-})
-
-test('a match Jev calls unrelated sends nothing but is logged', { options: { jevKey: 'sk-or-test-secret' } }, async ($, on) => {
-  const { h } = nudgeFixture(on, 0.2)
+test('a prompt that matches an item Jev calls relevant nudges on the next tool result, without holding the prompt', { options: { judgeKey: 'sk-or-test-secret' } }, async ($, on) => {
+  const { h, bodies } = nudgeFixture(on, 0.93)
   await start($)
   await h.clock.settle()
   expect((await submit($, 'why can the GKE pod not reach the yubihsm connector?')).context).toBeUndefined()
+  await h.clock.settle()
+  expect((await bash($)).context?.[0]).toContain('topic be: i-1')
+  expect(bodies).toHaveLength(1)
+  expect(JSON.parse(bodies[0]!).state.memory_item).toBe(HSM_ITEM.text)
+  expect(h.events().find(e => e.ev === 'nudge')).toMatchObject({ src: 'user', topic: 'be', p: 0.93, sent: true })
+  expect((await submit($, 'yubihsm connector again')).context).toBeUndefined()
+  expect(h.files.get(`${STATE}/events.jsonl`)).not.toContain('sk-or-test-secret')
+  expect(h.events().find(e => e.ev === 'start')).toMatchObject({ judgeKey: true })
+})
+
+test('a match Jev calls unrelated sends nothing but is logged', { options: { judgeKey: 'sk-or-test-secret' } }, async ($, on) => {
+  const { h } = nudgeFixture(on, 0.2)
+  await start($)
+  await h.clock.settle()
+  await submit($, 'why can the GKE pod not reach the yubihsm connector?')
+  await h.clock.settle()
+  expect((await bash($)).context).toBeUndefined()
   expect(h.events().find(e => e.ev === 'nudge')).toMatchObject({ p: 0.2, sent: false })
 })
 
-test('a match in the model text rides on the next tool result, once', { options: { jevKey: 'sk-or-test-secret' } }, async ($, on) => {
+test('a match in the model text rides on the next tool result, once', { options: { judgeKey: 'sk-or-test-secret' } }, async ($, on) => {
   const { h } = nudgeFixture(on, 0.93)
   await start($)
   await h.clock.settle()
@@ -624,10 +634,49 @@ test('a match in the model text rides on the next tool result, once', { options:
   expect(h.events().find(e => e.ev === 'nudge')).toMatchObject({ src: 'assistant', sent: true })
 })
 
-test('no jevKey means no nudge and no Jev call', async ($, on) => {
-  const { h, jev } = nudgeFixture(on, 0.93)
+test('no judgeKey means no nudge and no judge call', async ($, on) => {
+  const { h, bodies } = nudgeFixture(on, 0.93)
   await start($)
   await h.clock.settle()
   expect((await submit($, 'why can the GKE pod not reach the yubihsm connector?')).context).toBeUndefined()
-  expect(jev).toHaveLength(0)
+  expect(bodies).toHaveLength(0)
+})
+
+test('clef asks the configured gateway with the workers model and its own threshold', { options: { judge: 'clef', judgeUrl: 'https://gw.example/v1/run', judgeKey: 'k' } }, async ($, on) => {
+  const { h, bodies, urls } = nudgeFixture(on, [{ status: 200, body: { result: { model: 'clef', ...answers(0.72) }, success: true } }])
+  await start($)
+  await h.clock.settle()
+  await submit($, 'why can the GKE pod not reach the yubihsm connector?')
+  await h.clock.settle()
+  expect(urls).toEqual(['https://gw.example/v1/run'])
+  expect(JSON.parse(bodies[0]!).model).toBe('@cf/cloudflare/clef')
+  expect((await bash($)).context?.[0]).toContain('topic be: i-1')
+})
+
+test('clef without a judgeUrl stays off', { options: { judge: 'clef', judgeKey: 'k' } }, async ($, on) => {
+  const { h, bodies } = nudgeFixture(on, 0.93)
+  await start($)
+  await h.clock.settle()
+  await submit($, 'why can the GKE pod not reach the yubihsm connector?')
+  await h.clock.settle()
+  expect(bodies).toHaveLength(0)
+})
+
+test('a rate-limited judge is left alone for a minute', { options: { judgeKey: 'k' } }, async ($, on) => {
+  const { h, bodies } = nudgeFixture(on, [{ status: 429, body: { error: { code: 'rate_limit_exceeded' } } }, { status: 200, body: answers(0.93) }])
+  await start($)
+  await h.clock.settle()
+  const ask = async () => {
+    await submit($, 'why can the GKE pod not reach the yubihsm connector?')
+    await h.clock.settle()
+  }
+  await ask()
+  expect(h.events().find(e => e.ev === 'nudge')).toMatchObject({ status: 429, sent: false })
+  await h.clock.advance(30_000)
+  await ask()
+  expect(bodies).toHaveLength(1)
+  await h.clock.advance(31_000)
+  await ask()
+  expect(bodies).toHaveLength(2)
+  expect((await bash($)).context?.[0]).toContain('memory_search')
 })

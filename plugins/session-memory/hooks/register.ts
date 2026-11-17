@@ -2,14 +2,14 @@ import type { EngineInterface, Register, Timer } from 'claude-code'
 import { buildAutogroupPrompt, parseAutogroup, README_CHARS, type GroupInfo } from '../lib/autogroup-prompt.ts'
 import { formatRule, groupNames, groupOfPath, groupOfProjectDir, isTmp, isTmpDir, mangle, mergeRules, OTHER, parseGroups, repoOfPath, ruleOfPath, SKIP, type GroupRule } from '../lib/groups.ts'
 import { BUSY, withLock, type LockFs } from '../lib/lock.ts'
-import { JEV_URL, jevBody, jevYes, nudgeCandidates, nudgeText } from '../lib/nudge.ts'
+import { JUDGES, judgeBody, judgeYes, nudgeCandidates, nudgeText, type Judge } from '../lib/nudge.ts'
 import { parseJsonl, redact, type TranscriptRecord } from '../lib/slicer.ts'
 import { buildL0, openNode, refsText, SEARCH_MAX, searchItems } from '../lib/recall.ts'
 import { forget, loadGroup, loadRefs, saveGroup, type StoreIO } from '../lib/store.ts'
 import { processSession, type Outcome, type Trigger, type WorkerDeps } from '../lib/worker.ts'
 
 type $ = EngineInterface
-type Options = { model: string; dailyCalls: number; sweepMax: number; autoGroups: boolean; jevKey: string; jevModel: string; nudgeMin: number }
+type Options = { model: string; dailyCalls: number; sweepMax: number; autoGroups: boolean; judge: Judge; judgeUrl: string; judgeKey: string; judgeModel: string; nudgeMin: number }
 type Spender = Trigger | 'autogroup'
 type Usage = { calls: number; in: number; out: number; sweep?: number }
 type Seen = Record<string, { size: number; mtimeMs: number }>
@@ -25,8 +25,8 @@ const TOPICS_IN_PROMPT = 8
 const USAGE_DAYS = 14
 const MAX_FAILS = 3
 const CLAIM_STALE_MS = 2 * 60 * 60_000
-const NUDGE_WAIT_MS = 2_000
-const JEV_MAX_PER_SESSION = 200
+const JUDGE_MAX_PER_SESSION = 200
+const JUDGE_COOLDOWN_MS = 60_000
 const TOOL = 'mcp__session-memory__'
 const OPEN_INTRO = 'Open a session-memory topic node: lists its subtopics and items. A group or repo node id is valid.'
 const EVENTS_MAX_BYTES = 1024 * 1024
@@ -295,7 +295,7 @@ async function countFailure($: $, sid: string, group: string): Promise<boolean> 
   return giveUp
 }
 
-type Live = { opts: Options; active: boolean; cwd: string; group: string; grouped: boolean; repo: string; loaded: Set<string>; timer?: Timer; lastRun: Map<string, number>; chain: Promise<unknown>; nudged: Set<string>; searched: Set<string>; pending: string[]; jevCalls: number }
+type Live = { opts: Options; active: boolean; cwd: string; group: string; grouped: boolean; repo: string; loaded: Set<string>; timer?: Timer; lastRun: Map<string, number>; chain: Promise<unknown>; nudged: Set<string>; searched: Set<string>; pending: string[]; judgeCalls: number; judgeIdleUntil: number }
 
 function queue<T>(live: Live, fn: () => Promise<T>): Promise<T> {
   const next = live.chain.then(fn, fn)
@@ -355,39 +355,38 @@ async function recall($: $, live: Live, tool: string, arg: string) {
 }
 
 async function judge($: $, live: Live, text: string, src: 'user' | 'assistant'): Promise<string | null> {
-  if (!live.active || !live.grouped || live.group === SKIP || !live.opts.jevKey || live.jevCalls >= JEV_MAX_PER_SESSION) return null
+  const { judge, judgeUrl, judgeKey, judgeModel, nudgeMin } = live.opts
+  if (!live.active || !live.grouped || live.group === SKIP || !judgeKey || !judgeUrl || live.judgeCalls >= JUDGE_MAX_PER_SESSION) return null
+  if ((await $.clock.now()) < live.judgeIdleUntil) return null
   const state = await groupState($, live.group)
   const cands = nudgeCandidates(state, text, { sid: await $.session.id(), topics: new Set([...live.nudged, ...live.searched]) })
   const top = cands[0]
   if (!top) return null
   const topic = top.item.node
   const ids = cands.filter(c => c.item.node === topic).map(c => c.item.id)
-  live.jevCalls++
+  live.judgeCalls++
   const t0 = await $.clock.now()
   try {
-    const res = await $.http.fetch(JEV_URL, {
+    const res = await $.http.fetch(judgeUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${live.opts.jevKey}` },
-      body: jevBody(live.opts.jevModel, text, top.item),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${judgeKey}` },
+      body: judgeBody(judge, judgeModel, text, top.item),
     })
-    const p = res.ok ? jevYes(res.text) : null
-    const sent = p !== null && p >= live.opts.nudgeMin && !live.nudged.has(topic)
+    const p = res.ok ? judgeYes(judge, res.text) : null
+    if (p === null) live.judgeIdleUntil = (await $.clock.now()) + JUDGE_COOLDOWN_MS
+    const sent = p !== null && p >= nudgeMin && !live.nudged.has(topic)
     if (sent) live.nudged.add(topic)
     await emit($, 'nudge', { src, topic, items: ids, shared: top.shared, p, sent, ms: (await $.clock.now()) - t0, ...(res.ok ? {} : { status: res.status }) })
     return sent ? nudgeText(top, ids) : null
   } catch (e) {
+    live.judgeIdleUntil = (await $.clock.now()) + JUDGE_COOLDOWN_MS
     await emit($, 'nudge', { src, topic, items: ids, sent: false, error: redact(String(e)).slice(0, 300), ms: (await $.clock.now()) - t0 })
     return null
   }
 }
 
-async function judgeWithin($: $, live: Live, text: string): Promise<string | null> {
-  const judged = judge($, live, text, 'user').catch(() => null)
-  const late = Symbol('late')
-  const first = await Promise.race([judged, $.clock.sleep(NUDGE_WAIT_MS).then(() => late)])
-  if (typeof first !== 'symbol') return first
-  void judged.then(n => void (n && live.pending.push(n)))
-  return null
+function judgeLater($: $, live: Live, text: string, src: 'user' | 'assistant') {
+  void judge($, live, text, src).then(n => void (n && live.pending.push(n))).catch(() => undefined)
 }
 
 async function forgetItem($: $, live: Live, id: string): Promise<string> {
@@ -510,9 +509,10 @@ async function startSweep($: $, live: Live) {
   live.nudged = new Set()
   live.searched = new Set()
   live.pending = []
-  live.jevCalls = 0
-  const { jevKey, ...shown } = live.opts
-  await emit($, 'start', { cwd: live.cwd, group: live.group, ...shown, jev: jevKey !== '' })
+  live.judgeCalls = 0
+  live.judgeIdleUntil = 0
+  const { judgeKey, ...shown } = live.opts
+  await emit($, 'start', { cwd: live.cwd, group: live.group, ...shown, judgeKey: judgeKey !== '' })
   if (live.group === SKIP) return
   await registerTools($, live)
   if ((await sweep($, live.opts, live.group, await $.session.id())).done > 0) await registerTools($, live)
@@ -529,14 +529,18 @@ async function markPending($: $, sid: string, cwd: string) {
   await $.store.set('pending', pending)
 }
 
+function judgeOpts(options: Record<string, unknown>) {
+  const judge: Judge = options.judge === 'clef' ? 'clef' : 'jev'
+  const d = JUDGES[judge]
+  return { judge, judgeUrl: String(options.judgeUrl || d.url), judgeKey: String(options.judgeKey ?? ''), judgeModel: String(options.judgeModel || d.model), nudgeMin: num(options.nudgeMin, d.min) }
+}
+
 export const register: Register = (on, options) => {
   const live: Live = {
     opts: {
       model: String(options.model || 'sonnet'),
       dailyCalls: num(options.dailyCalls, 150), sweepMax: num(options.sweepMax, 10), autoGroups: options.autoGroups !== false && options.autoGroups !== 'false',
-      jevKey: String(options.jevKey ?? ''),
-      jevModel: String(options.jevModel || 'jev-1.13'),
-      nudgeMin: num(options.nudgeMin, 0.8),
+      ...judgeOpts(options),
     },
     active: false,
     cwd: '',
@@ -549,7 +553,8 @@ export const register: Register = (on, options) => {
     nudged: new Set(),
     searched: new Set(),
     pending: [],
-    jevCalls: 0,
+    judgeCalls: 0,
+    judgeIdleUntil: 0,
   }
 
   on('session.start', async ($, e, next) => {
@@ -574,14 +579,14 @@ export const register: Register = (on, options) => {
 
   on('prompt.submit', async ($, e, next) => {
     if (!live.active || e.command || e.isMeta) return next(e)
-    const fresh = await judgeWithin($, live, e.text)
-    const add = [...live.pending.splice(0), ...(fresh ? [fresh] : [])]
+    judgeLater($, live, e.text, 'user')
+    const add = live.pending.splice(0)
     return next(add.length ? { ...e, context: [...(e.context ?? []), ...add] } : e)
   })
 
   on('turn.step', async function* ($, e, next) {
     const r = yield* next(e)
-    if (live.active && e.agentId === undefined && r?.answer?.trim()) void judge($, live, r.answer, 'assistant').then(n => void (n && live.pending.push(n))).catch(() => undefined)
+    if (live.active && e.agentId === undefined && r?.answer?.trim()) judgeLater($, live, r.answer, 'assistant')
     return r
   })
 
