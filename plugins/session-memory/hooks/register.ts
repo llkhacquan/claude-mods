@@ -574,7 +574,7 @@ export const register: Register = (on, options) => {
 
   for (const name of ['memory_open', 'memory_search', 'memory_refs']) {
     const key = { memory_open: 'node', memory_search: 'query', memory_refs: 'item' }[name] as string
-    on('tool.call', { tool: `${TOOL}${name}` }, ($, e) => recall($, live, name, String((e as unknown as Record<string, unknown>)[key] ?? '')))
+    on('tool.run', { tool: `${TOOL}${name}` }, ($, e) => recall($, live, name, String((e as unknown as Record<string, unknown>)[key] ?? '')))
   }
 
   on('prompt.submit', async ($, e, next) => {

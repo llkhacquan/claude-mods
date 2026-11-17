@@ -168,7 +168,7 @@ test('the mined items reach the model through L0 and the three memory tools', as
   expect(h.tools.get('memory_open')).toContain('[i-1] deploys need a human go  refs=1 (you 1, agent 0)')
 
   const call = async (name: string, arg: Record<string, string>) =>
-    String(((await $.tool.call({ tool: `mcp__session-memory__${name}`, ...arg } as never)) as { result: unknown }).result)
+    String(((await $.tool.run({ tool: `mcp__session-memory__${name}`, ...arg } as never)) as { result: unknown }).result)
   expect(await call('memory_search', { query: 'human deploys' })).toContain('[i-1] deploys need a human go')
   expect(await call('memory_open', { node: 'be' })).toContain('be: be')
   expect(await call('memory_refs', { item: 'i-1' })).toContain('user: "about deploys"')
