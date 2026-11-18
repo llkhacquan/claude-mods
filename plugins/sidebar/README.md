@@ -30,6 +30,8 @@ A side pane that shows every live Claude Code session on this machine as a card.
 
 Answer `y` to add the marketplace, then pick the user scope so every session loads it. A session without the mod has no card.
 
+It works in the terminal and in the Claude desktop app (Code tab). The desktop app loads a newly installed or updated plugin only after a restart.
+
 ## Use
 
 Type `/sidebar`. In the fullscreen layout the pane docks beside the transcript; on the main screen it opens above the prompt.

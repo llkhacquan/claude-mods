@@ -141,6 +141,7 @@ let turnFiles = new Set<string>()
 let lastRequest = ''
 let callsInFlight = 0
 let isInteractive = true
+let startCwd = ''
 let isDebug = false
 let paneWidth = PANE_COLUMNS
 let current: Mode = 'closed'
@@ -780,36 +781,49 @@ async function makeRecap($: EngineInterface, prompt: string, seq: number): Promi
   if (recap.length > 0) await publish($, { recap })
 }
 
+async function begin($: EngineInterface) {
+  dir = feedDir(await $.env.get('CLAUDE_SIDEBAR_STATE_DIR'), await $.env.get('XDG_STATE_HOME'), await $.env.get('HOME'))
+  signalPath = signalFile(dir)
+  isDebug = (await $.env.get('CLAUDE_SIDEBAR_DEBUG')) === '1'
+  const sessionId = await $.session.id()
+  const saved = sessionId === own.sessionId ? own : await savedCard($, sessionId)
+  const isNewFeed = !(await $.fs.exists(dir))
+  await publish($, {
+    sessionId,
+    paneId: (await $.env.get('TMUX_PANE')) ?? '',
+    cwd: startCwd,
+    ...(await readGit($, startCwd)),
+    status: 'idle',
+    model: await $.session.model(),
+    title: saved?.title ?? '',
+    ...(saved?.status === 'idle' && saved.since > 0 ? { since: saved.since } : {}),
+  })
+  if (isNewFeed) await closeFeed($)
+  for (const timer of timers) timer.cancel()
+  spinner?.cancel()
+  spinner = null
+  timers = [$.clock.every(HEARTBEAT_MS, () => void beat($))]
+  await restartWatch($)
+  await applyMode($, await storedMode($))
+  if (current !== 'open') await refresh($)
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
     await $.command.register({ name: 'sidebar', description: 'Show every live Claude session in a side pane' })
-    isInteractive = e.isInteractive
-    if (!isInteractive) return r
-    dir = feedDir(await $.env.get('CLAUDE_SIDEBAR_STATE_DIR'), await $.env.get('XDG_STATE_HOME'), await $.env.get('HOME'))
-    signalPath = signalFile(dir)
-    isDebug = (await $.env.get('CLAUDE_SIDEBAR_DEBUG')) === '1'
-    const sessionId = await $.session.id()
-    const saved = sessionId === own.sessionId ? own : await savedCard($, sessionId)
-    const isNewFeed = !(await $.fs.exists(dir))
-    await publish($, {
-      sessionId,
-      paneId: (await $.env.get('TMUX_PANE')) ?? '',
-      cwd: e.cwd,
-      ...(await readGit($, e.cwd)),
-      status: 'idle',
-      model: await $.session.model(),
-      title: saved?.title ?? '',
-      ...(saved?.status === 'idle' && saved.since > 0 ? { since: saved.since } : {}),
-    })
-    if (isNewFeed) await closeFeed($)
-    for (const timer of timers) timer.cancel()
-    spinner?.cancel()
-    spinner = null
-    timers = [$.clock.every(HEARTBEAT_MS, () => void beat($))]
-    await restartWatch($)
-    await applyMode($, await storedMode($))
-    if (current !== 'open') await refresh($)
+    startCwd = e.cwd
+    // desktop app runs the engine as an SDK client => isInteractive false; its surface attaches later
+    isInteractive = e.isInteractive || (await $.session.surfaces()).length > 0
+    if (isInteractive) await begin($)
+    return r
+  })
+
+  on('session.attach', async ($, e, next) => {
+    const r = await next(e)
+    if (isInteractive || startCwd === '') return r
+    isInteractive = true
+    await begin($)
     return r
   })
 
@@ -846,9 +860,9 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('classic.UserPromptSubmit', async ($, e, next) => {
-    const prompt = e.prompt.replace(/[\n\r\t]/g, ' ').trim()
-    if (!isInteractive || (e.source && e.source !== 'user') || prompt === '' || isSynthetic(prompt)) return next(e)
+  on('prompt.submit', async ($, e, next) => {
+    const prompt = e.text.replace(/[\n\r\t]/g, ' ').trim()
+    if (!isInteractive || e.command || e.isMeta || prompt === '' || isSynthetic(prompt)) return next(e)
     const seq = ++titleSeq
     const fixed = urlOnlyTitle(prompt)
     if (fixed) {

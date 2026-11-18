@@ -211,6 +211,16 @@ test('a session publishes its card with no tmux, and a turn moves it from idle t
   expect(own()).toMatchObject({ status: 'idle', asked: true, tool: '' })
 })
 
+test('a desktop app session publishes its card once its surface attaches', async ($, on) => {
+  const { own } = harness(on)
+  on('session.attach', ($, e) => ({ clientId: e.clientId }))
+  on('session.surfaces', () => ({ value: [] }))
+  await $.session.start({ surface: 'desktop', isInteractive: false, cwd: '/work/web' })
+  expect(own()).toBeNull()
+  await $.session.attach({ surface: 'desktop', clientId: 'desktop:default' })
+  expect(own()).toMatchObject({ sessionId: SID, cwd: '/work/web', status: 'idle' })
+})
+
 test('a session inside tmux records its pane', async ($, on) => {
   const { own } = harness(on, { TMUX: '/tmp/tmux-501/default,1,0', TMUX_PANE: '%7' })
 
