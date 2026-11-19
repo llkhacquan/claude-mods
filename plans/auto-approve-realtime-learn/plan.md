@@ -29,7 +29,7 @@ only way to stop it today is `/auto-approve add` by hand, or the weekly `/auto-a
 ## Before this: the mod must be the gate
 
 The flow below runs only where this mod decides the tool calls. On the author's machine the gate
-is still the qflow skill (three node hooks in `~/.claude/settings.json`). Switching is its own
+is still a separate skill (three node hooks in `~/.claude/settings.json`). Switching is its own
 unit of work:
 
 - install the mod and remove the three hooks from `settings.json`
