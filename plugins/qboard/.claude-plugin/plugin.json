@@ -1,0 +1,8 @@
+{
+  "name": "qboard",
+  "version": "0.1.0",
+  "description": "Question board: Claude puts open questions on a side pane with stable Q<n> ids, you answer with a click or by typing Q<n> <option>",
+  "author": { "name": "llkhacquan" },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

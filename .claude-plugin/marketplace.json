@@ -13,6 +13,12 @@
       "category": "security"
     },
     {
+      "name": "qboard",
+      "description": "Question board: Claude puts open questions on a side pane with stable Q<n> ids, you answer with a click or Q<n> <option>",
+      "source": "./plugins/qboard",
+      "category": "productivity"
+    },
+    {
       "name": "sidebar",
       "description": "Shows every live Claude Code session as a card in a side pane, with an optional tmux jump",
       "source": "./plugins/sidebar",
