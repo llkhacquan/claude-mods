@@ -70,7 +70,9 @@ export async function terminalPane($: EngineInterface, e: RenderInputOf<'Pane', 
         ))}
         {q.thread?.map((t, i) => (
           <Box key={`${k}-thread-${i}`} flexDirection="row" gap={1} paddingLeft={1}>
-            <Text color={t.who === 'user' ? BLUE : GREEN}>{t.who === 'user' ? 'you' : 'claude'}</Text>
+            <Box flexShrink={0}>
+              <Text color={t.who === 'user' ? BLUE : GREEN}>{t.who === 'user' ? 'you' : 'claude'}</Text>
+            </Box>
             <Box flexGrow={1}>
               <Text>{t.text}</Text>
             </Box>
