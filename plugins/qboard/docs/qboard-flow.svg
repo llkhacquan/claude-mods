@@ -43,11 +43,11 @@
     <text x="337" y="119" fill="#0f172a" font-weight="700">Q3</text>
     <text x="376" y="119" fill="#e5e7eb" font-weight="700">Which layout for the pane?</text>
     <text x="808" y="119" fill="#94a3b8">2m</text>
-    <text x="344" y="146" fill="#e5e7eb">Q3.1 dock right</text>
+    <text x="344" y="146" fill="#e5e7eb">1: dock right</text>
     <text x="376" y="164" fill="#94a3b8">keeps the transcript wide</text>
     <text x="332" y="188" fill="#e0a526" font-weight="700">*</text>
-    <text x="344" y="188" fill="#e5e7eb">Q3.2 float</text>
-    <text x="440" y="188" fill="#94a3b8">(lean)</text>
+    <text x="344" y="188" fill="#e5e7eb">2: float</text>
+    <text x="424" y="188" fill="#94a3b8">(lean)</text>
     <text x="332" y="212" fill="#6fa8dc">[explain more]</text>
     <rect x="332" y="222" width="496" height="26" rx="4" fill="#1e293b"/>
     <text x="342" y="240" fill="#64748b">answer, or ask below</text>

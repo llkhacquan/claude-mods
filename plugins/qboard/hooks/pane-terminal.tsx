@@ -57,7 +57,7 @@ export async function terminalPane($: EngineInterface, e: RenderInputOf<'Pane', 
                 <Text key={`${k}-${i + 1}-off`} dimColor>{`${q.id}.${i + 1} ${opt}`}</Text>
               ) : (
                 <Button key={`${k}-${i + 1}`} plain hotkey={isFirst && i < 9 ? String(i + 1) : undefined} onPress={() => src.pick(i + 1)}>
-                  {`${q.id}.${i + 1} ${opt}`}
+                  {isFirst && i < 9 ? `${opt}` : `${q.id}.${i + 1} ${opt}`}
                 </Button>
               )}
             </Box>
