@@ -516,18 +516,22 @@ const MAX_DRAFT_ROWS = 6
 // rows 1 => single-line field that drops typed newlines; 2+ => textarea
 const MIN_DRAFT_ROWS = 2
 
-export function draftRows(draft: string | undefined, width?: number): number {
-  const lines = (draft ?? '').split('\n')
-  const wrapped = width ? lines.reduce((n, l) => n + Math.ceil(Math.max(1, [...l].length) / width), 0) : lines.length
-  return Math.min(MAX_DRAFT_ROWS, Math.max(MIN_DRAFT_ROWS, wrapped))
+export function draftRows(draft: string | undefined): number {
+  return Math.min(MAX_DRAFT_ROWS, Math.max(MIN_DRAFT_ROWS, (draft ?? '').split('\n').length))
 }
 
-// pane body minus card border + padding (4), gap (1), [ask] chip (7), submit label (5)
-const INPUT_CHROME_COLUMNS = 17
+// pane body minus card border + padding (4) and the focus hint "⏎ send · \⏎ new line" the Input draws beside its text (20)
+const INPUT_CHROME_COLUMNS = 24
 const MIN_INPUT_WIDTH = 10
 
-export function inputWidth(bodyColumns: number): number {
-  return Math.max(MIN_INPUT_WIDTH, bodyColumns - INPUT_CHROME_COLUMNS)
+// upstream: Input clips a line wider than the field with an ellipsis instead of wrapping
+export function draftPreview(draft: string | undefined, bodyColumns: number): string | undefined {
+  const width = Math.max(MIN_INPUT_WIDTH, bodyColumns - INPUT_CHROME_COLUMNS)
+  const text = draft ?? ''
+  if (!text.split('\n').some(l => [...l].length > width)) return undefined
+  const chars = [...text]
+  const cap = width * MAX_DRAFT_ROWS
+  return chars.length > cap ? `...${chars.slice(3 - cap).join('')}` : text
 }
 
 // update() is not atomic across two concurrent presses => the claim is a sync check-and-set

@@ -2,7 +2,7 @@ import { expect, mock, test, type Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import type { Board } from '../types'
-import { asksInChat, draftRows, inputWidth } from '../hooks/core'
+import { asksInChat, draftPreview } from '../hooks/core'
 import { DESKTOP_PANE_GOLDEN } from './desktop-pane-golden'
 import { TERMINAL_PANE_GOLDEN } from './terminal-pane-golden'
 
@@ -805,29 +805,28 @@ test('the text box takes newlines from the start and grows with the draft, up to
   await ui.unmount()
 })
 
-test('draft rows count wrapped lines at the input width, clamped 2 to 6', () => {
-  expect(draftRows(undefined, 40)).toBe(2)
-  expect(draftRows('', 40)).toBe(2)
-  expect(draftRows('x'.repeat(40), 40)).toBe(2)
-  expect(draftRows('x'.repeat(41), 40)).toBe(2)
-  expect(draftRows('x'.repeat(81), 40)).toBe(3)
-  expect(draftRows('x'.repeat(121), 40)).toBe(4)
-  expect(draftRows('x'.repeat(120), 40)).toBe(3)
-  expect(draftRows('x'.repeat(100) + '\nshort', 40)).toBe(4)
-  expect(draftRows('a\nb\nc', 40)).toBe(3)
-  expect(draftRows('x'.repeat(10000), 40)).toBe(6)
-  expect(draftRows('x'.repeat(500))).toBe(2)
-  expect(inputWidth(60)).toBe(43)
-  expect(inputWidth(5)).toBe(10)
+test('the draft preview starts one column past the field and keeps only the tail of a huge draft', () => {
+  expect(draftPreview('a'.repeat(36), 60)).toBeUndefined()
+  expect(draftPreview('a'.repeat(37), 60)).toBe('a'.repeat(37))
+  expect(draftPreview(`short\n${'b'.repeat(37)}`, 60)).toBe(`short\n${'b'.repeat(37)}`)
+  expect(draftPreview('a'.repeat(10), 20)).toBeUndefined()
+  expect(draftPreview('a'.repeat(11), 20)).toBe('a'.repeat(11))
+  const huge = `${'x'.repeat(10)}${'y'.repeat(300)}`
+  expect(draftPreview(huge, 60)).toBe(`...${'y'.repeat(213)}`)
 })
 
-test('a long single line grows the text box in the terminal pane', async ($, on) => {
+test('a draft with a line wider than the field is previewed in full above the input', async ($, on) => {
   harness(on)
   await start($)
   await ask($, { text: 'Push?' })
   const ui = await $.ui.mount(PANE)
-  await ui.input({ key: 'Q1-input', text: 'x'.repeat(100), kind: 'change' })
-  expect((await ui.find({ type: 'Input', key: 'Q1-input' }))?.props.rows).toBe(3)
+  const previewed = async (text: string) => JSON.stringify(await ui.drawn()).includes(`{"type":"Text","props":{"dimColor":true},"children":["${text}"]}`)
+  const short = 'short\\nlines'
+  await ui.input({ key: 'Q1-input', text: 'short\nlines', kind: 'change' })
+  expect(await previewed(short)).toBe(false)
+  const long = 'word '.repeat(30).trim()
+  await ui.input({ key: 'Q1-input', text: long, kind: 'change' })
+  expect(await previewed(long)).toBe(true)
   await ui.unmount()
 })
 

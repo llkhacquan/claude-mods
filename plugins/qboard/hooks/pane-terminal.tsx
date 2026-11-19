@@ -1,7 +1,7 @@
 import type { EngineInterface, RenderInputOf } from 'claude-code'
 
 import type { Question } from '../types'
-import { AMBER, BLUE, GREEN, QUEUED_NOTE, age, cardTexts, draftRows, filePaths, isAwaitingReply, inputWidth, openFile, cardActions, paneState, setDraft, takeDraft, toggleDone, toggleMode, typedLine } from './core'
+import { AMBER, BLUE, GREEN, QUEUED_NOTE, age, cardTexts, draftRows, filePaths, isAwaitingReply, draftPreview, openFile, cardActions, paneState, setDraft, takeDraft, toggleDone, toggleMode, typedLine } from './core'
 
 export async function terminalPane($: EngineInterface, e: RenderInputOf<'Pane', 'terminal'>) {
   const { Box, Text, Button, Input } = $.ui.resolve(e)
@@ -36,6 +36,7 @@ export async function terminalPane($: EngineInterface, e: RenderInputOf<'Pane', 
     const isLocked = pickedOf[k] !== undefined || sendingOf[k] !== undefined || held !== undefined
     const lockText = sendingOf[k] ?? (held ? typedLine(q, held) : `${q.id}.${pickedOf[k]}`)
     const lockNote = sendingOf[k] !== undefined || pickedOf[k] !== undefined ? 'sending...' : QUEUED_NOTE
+    const preview = isLocked ? undefined : draftPreview(draftOf[k], e.props.bodyColumns)
     return (
       <Box key={k} flexDirection="column" borderStyle="round" borderColor={isFirst ? AMBER : undefined} borderDimColor={!isFirst} paddingX={1}>
         <Box flexDirection="row" gap={1}>
@@ -88,15 +89,16 @@ export async function terminalPane($: EngineInterface, e: RenderInputOf<'Pane', 
             {chip('\uf05a', 'explain more')}
           </Button>
         )}
-        <Box flexDirection="row" gap={1}>
+        <Box flexDirection="column">
           <Box flexGrow={1} flexDirection="column">
+            {preview && <Text key={`${k}-preview`} dimColor>{preview}</Text>}
             {isLocked ? (
               <Text key={`${k}-sending`} dimColor>{`${lockText}  (${lockNote})`}</Text>
             ) : (
               <Input
                 key={`${k}-input`}
                 value={draftOf[k] ?? ''}
-                rows={draftRows(draftOf[k], inputWidth(e.props.bodyColumns))}
+                rows={draftRows(draftOf[k])}
                 placeholder="answer (Enter), or a question ([ask])"
                 submitLabel={mode === 'send' ? 'send' : 'fill'}
                 onInput={v => void setDraft($, k, v)}
