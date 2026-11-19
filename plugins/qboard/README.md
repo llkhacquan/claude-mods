@@ -20,6 +20,8 @@ It works in the terminal and in the Claude desktop app (Code tab), with a pane d
 
 The pane opens when a session starts. `/qboard` hides or shows it. While questions are open, a band above the prompt lists their ids, with an `[open]` button that brings the pane back.
 
+Where the pane shows is Claude Code's choice. In the fullscreen layout (set `CLAUDE_CODE_NO_FLICKER=1`, for example in the `env` block of `settings.json`) it docks on the right of the transcript when the terminal is at least 110 columns wide, and it scrolls on its own. On the main screen (the default inside tmux) it sits above the prompt.
+
 Answer a question in any of these ways:
 
 | You do | It means |

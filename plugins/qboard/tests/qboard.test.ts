@@ -31,10 +31,10 @@ function harness(on: On, seed?: Board, opts: { sid?: string; env?: Record<string
   on('session.id', () => ({ value: sid.value }))
   on('session.cwd', () => ({ value: '/work' }))
   const panes = new Map<string, { isShown: boolean }>()
-  const opens: { id: string; focus?: true }[] = []
+  const opens: { id: string; focus?: true; columns?: number }[] = []
   on('ui.panes', () => ({ value: [...panes].map(([id, p]) => ({ id, title: id, isShown: p.isShown, isFocused: false, isPlaced: p.isShown })) }))
   on('ui.open', ($, e) => {
-    opens.push({ id: e.id, focus: e.focus })
+    opens.push({ id: e.id, focus: e.focus, columns: e.columns })
     panes.set(e.id, { isShown: true })
     return { value: { isPlaced: true } }
   })
@@ -943,17 +943,17 @@ test('/clear carries the open questions to the new session and the band shows th
 test('the pane opens at session start, /qboard toggles it, the band [open] brings it back', async ($, on) => {
   const { panes, opens } = harness(on)
   await start($)
-  expect(opens).toEqual([{ id: 'qboard', focus: undefined }])
+  expect(opens).toEqual([{ id: 'qboard', focus: undefined, columns: 60 }])
   await start($)
   expect(opens).toHaveLength(1)
   await $.command.run(RUN)
   expect(panes.has('qboard')).toBe(false)
   await $.command.run(RUN)
-  expect(opens.at(-1)).toEqual({ id: 'qboard', focus: true })
+  expect(opens.at(-1)).toEqual({ id: 'qboard', focus: true, columns: 60 })
   panes.set('qboard', { isShown: false })
   await $.command.run(RUN)
   expect(panes.get('qboard')).toEqual({ isShown: true })
-  expect(opens.at(-1)).toEqual({ id: 'qboard', focus: true })
+  expect(opens.at(-1)).toEqual({ id: 'qboard', focus: true, columns: 60 })
   await $.command.run(RUN)
   await ask($, { text: 'A?', options: ['x', 'y'] })
   const band = await $.ui.mount(BAND)

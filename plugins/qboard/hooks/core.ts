@@ -4,6 +4,7 @@ import type { EngineInterface } from 'claude-code'
 import type { Board, Queued, Question, SendMode, ThreadEntry } from '../types'
 
 export const PANE = 'qboard'
+const PANE_COLUMNS = 60
 const DONE_SHOWN = 5
 const SWITCH_STEP_MS = 100
 const SWITCH_TRIES = 50
@@ -362,7 +363,7 @@ export async function current($: EngineInterface): Promise<Board> {
 export async function ensurePane($: EngineInterface) {
   try {
     if (await read($, paneHidden)) return
-    if (!(await $.ui.panes()).some(p => p.id === PANE)) await $.ui.open({ id: PANE, title: 'qboard' })
+    if (!(await $.ui.panes()).some(p => p.id === PANE)) await $.ui.open({ id: PANE, title: 'qboard', columns: PANE_COLUMNS })
   } catch (err) {
     $.ui.log(`qboard: could not open the pane: ${String(err)}`)
   }
@@ -370,7 +371,7 @@ export async function ensurePane($: EngineInterface) {
 
 export async function showPane($: EngineInterface) {
   await update($, paneHidden, () => false)
-  await $.ui.open({ id: PANE, title: 'qboard', focus: true })
+  await $.ui.open({ id: PANE, title: 'qboard', columns: PANE_COLUMNS, focus: true })
 }
 
 // after session.end, with no session.start => wait for the new id, then load. /resume of the
