@@ -166,7 +166,7 @@ export async function terminalPane($: EngineInterface, e: RenderInputOf<'Pane', 
           {isDoneShown && done.map(doneRow)}
         </Box>
       )}
-      <Text dimColor>{`ctrl+x tab focus  ${open[0] ? `1-9 answer ${open[0].id}  ` : ''}d done`}</Text>
+      <Text dimColor>{`ctrl+x tab focus  esc back  ${open[0] ? `1-9 answer ${open[0].id}  ` : ''}d done`}</Text>
     </Box>
   )
 }
