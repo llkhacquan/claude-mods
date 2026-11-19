@@ -8,15 +8,26 @@ Claude calls `mcp__qboard__ask`. The plugin saves the question to the session's 
 
 ## Install
 
+In a Claude Code session:
+
 ```
 /plugin install qboard --marketplace llkhacquan/claude-mods
 ```
 
-Answer `y` to add the marketplace, then pick the user scope so every session has the board.
+Answer `y` to add the marketplace, then pick the user scope so every session has the board. The same in two steps:
+
+```
+/plugin marketplace add llkhacquan/claude-mods
+/plugin install qboard@claude-mods
+```
+
+In the terminal the pane shows at once, no restart needed. To try it, ask Claude for something with a choice in it, for example "pick a cache for the session store and ask me before you start". To remove it: `/plugin uninstall qboard@claude-mods`.
 
 It works in the terminal and in the Claude desktop app (Code tab), with a pane drawn for each: plain text with key hints in the terminal, buttons and pills in the desktop app. Both show the same cards and do the same things. The desktop app loads a newly installed or updated plugin only after a restart.
 
 ## Use
+
+![The pane docked on the right in the terminal](docs/terminal-pane.png)
 
 The pane opens when a session starts. `/qboard` hides or shows it. While questions are open, a band above the prompt lists their ids, with an `[open]` button that brings the pane back.
 
