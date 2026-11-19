@@ -101,7 +101,7 @@ export async function terminalPane($: EngineInterface, e: RenderInputOf<'Pane', 
                 key={`${k}-input`}
                 value={draftOf[k] ?? ''}
                 rows={draftRows(draftOf[k])}
-                placeholder="answer (Enter), or a question ([ask])"
+                placeholder="answer, or ask below"
                 submitLabel={mode === 'send' ? 'send' : 'fill'}
                 onInput={v => void setDraft($, k, v)}
                 onSubmit={v => {

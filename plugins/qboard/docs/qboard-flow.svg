@@ -50,7 +50,7 @@
     <text x="440" y="188" fill="#94a3b8">(lean)</text>
     <text x="332" y="212" fill="#6fa8dc">[explain more]</text>
     <rect x="332" y="222" width="496" height="26" rx="4" fill="#1e293b"/>
-    <text x="342" y="240" fill="#64748b">answer (Enter), or a question ([ask])</text>
+    <text x="342" y="240" fill="#64748b">answer, or ask below</text>
     <text x="332" y="268" fill="#6fa8dc">[ask]</text>
 
     <rect x="320" y="288" width="520" height="52" rx="8" fill="none" stroke="#475569"/>
