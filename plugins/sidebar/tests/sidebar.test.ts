@@ -164,7 +164,10 @@ function harness(on: On, env: Record<string, string> = {}, stored: Record<string
     return { value: undefined }
   })
   on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('session.id', () => ({ value: SID }))
+  const verdict: { decision: 'ask' | 'allow' } = { decision: 'allow' }
+  const shell = { cwd: '/work/web' }
+  let sessionId = SID
+  on('session.id', () => ({ value: sessionId }))
   on('session.start', () => ({ cwd: '/work/web' }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
@@ -172,14 +175,18 @@ function harness(on: On, env: Record<string, string> = {}, stored: Record<string
     await pass('call', e.tool)
     return { result: 'ok' }
   })
-  on('classic.PermissionRequest', () => ({}))
+  on('tool.check', () => ({ decision: verdict.decision }))
+  on('session.cwd', () => ({ value: shell.cwd }))
   on('turn.complete', () => ({ text: '' }))
   const own = () => JSON.parse(files.get(`${DIR}/${SID}.json`) ?? 'null')
   const others = (...list: Card[]) => {
     for (const c of list) put(`${DIR}/${c.sessionId}.json`, JSON.stringify(c))
   }
   const tmuxCalls = () => ran.filter(argv => argv[0] === 'tmux')
-  return { clock, files, mtimes, own, others, tmuxCalls, toasts, opened, store, ran, spawned, wake, pulse, killTail, hold }
+  const switchTo = (id: string) => {
+    sessionId = id
+  }
+  return { put, verdict, shell, switchTo, clock, files, mtimes, own, others, tmuxCalls, toasts, opened, store, ran, spawned, wake, pulse, killTail, hold }
 }
 
 async function start($: Engine) {
@@ -448,20 +455,79 @@ test('a card rewritten inside one mtime tick is read again when its size differs
 })
 
 test('a tool call beside one that waits for the person keeps the card on needs input', async ($, on) => {
-  const { own, hold } = harness(on)
+  const { own, hold, verdict } = harness(on)
 
   await start($)
   await $.turn.start({ text: 'go', turnId: 't1' })
   const bash = hold('call', 'Bash')
   const waiting = $.tool.call({ tool: 'Bash', command: 'rm -rf build' })
   await bash.reached
-  await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'rm -rf build' } })
+  verdict.decision = 'ask'
+  await $.tool.check({ tool: 'Bash', input: { command: 'rm -rf build' } })
   await $.tool.call({ tool: 'Read', file_path: '/work/web/a.go' })
   expect(own().status).toBe('needs-input')
 
   bash.release()
   await waiting
   expect(own().status).toBe('running')
+})
+
+test('an allowed check keeps the card running, an ask while idle changes nothing', async ($, on) => {
+  const { own, verdict } = harness(on)
+
+  await start($)
+  verdict.decision = 'ask'
+  await $.tool.check({ tool: 'Bash', input: { command: 'ls' } })
+  expect(own().status).toBe('idle')
+
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  verdict.decision = 'allow'
+  await $.tool.check({ tool: 'Bash', input: { command: 'ls' } })
+  expect(own().status).toBe('running')
+})
+
+test('a clear ends the old card and starts a ready card under the new id', async ($, on) => {
+  const { files, own, switchTo } = harness(on)
+
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  switchTo('sess-2')
+  await $.session.end({ sessionId: SID, reason: 'clear', resume: { id: SID } })
+
+  expect(own().status).toBe('ended')
+  const next = JSON.parse(files.get(`${DIR}/sess-2.json`) ?? 'null')
+  expect(next).toMatchObject({ sessionId: 'sess-2', status: 'idle', title: 'Ready', recap: [] })
+})
+
+test('a resume starts the new id with the title its saved card had', async ($, on) => {
+  const { files, put, switchTo } = harness(on)
+
+  put(`${DIR}/sess-3.json`, JSON.stringify(card({ sessionId: 'sess-3', title: 'Old work' })))
+  await start($)
+  switchTo('sess-3')
+  await $.session.end({ sessionId: SID, reason: 'resume', resume: { id: SID } })
+
+  expect(JSON.parse(files.get(`${DIR}/sess-3.json`) ?? 'null')).toMatchObject({ status: 'idle', title: 'Old work' })
+})
+
+test('an exit leaves no new card behind', async ($, on) => {
+  const { files } = harness(on)
+
+  await start($)
+  await $.session.end({ sessionId: SID, reason: 'prompt_input_exit', resume: { id: SID } })
+
+  expect([...files.keys()].filter(k => k.endsWith('.json'))).toEqual([`${DIR}/${SID}.json`])
+})
+
+test('a turn that ends in another folder moves the card there', async ($, on) => {
+  const { own, shell } = harness(on)
+
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  shell.cwd = '/work/api'
+  await $.turn.complete({ turnId: 't1', answer: 'done', durationMs: 5, isAborted: false, reason: 'answer' })
+
+  expect(own().cwd).toBe('/work/api')
 })
 
 test('a session that ends sends its signal before the end returns, inside a burst too', async ($, on) => {

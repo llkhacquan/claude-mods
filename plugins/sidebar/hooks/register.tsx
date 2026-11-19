@@ -849,17 +849,6 @@ export const register: Register = on => {
     return r
   })
 
-  on('classic.SessionStart', async ($, e, next) => {
-    const isCleared = e.source === 'clear'
-    if (isCleared || (own.sessionId !== '' && e.session_id !== own.sessionId)) {
-      titleSeq++
-      recapSeq++
-      const title = isCleared ? TITLE_READY : ((await savedCard($, e.session_id))?.title ?? '')
-      await publish($, { sessionId: e.session_id, status: 'idle', asked: false, tool: '', title, recap: [] })
-    }
-    return next(e)
-  })
-
   on('prompt.submit', async ($, e, next) => {
     const prompt = e.text.replace(/[\n\r\t]/g, ' ').trim()
     if (!isInteractive || e.command || e.isMeta || prompt === '' || isSynthetic(prompt)) return next(e)
@@ -875,6 +864,12 @@ export const register: Register = on => {
       $.ui.log(`sidebar: title failed: ${err}`, { to: 'debug' })
     })
     return next(e)
+  })
+
+  on('tool.check', async ($, e, next) => {
+    const r = await next(e)
+    if (r.decision === 'ask' && own.status === 'running') await publish($, { status: 'needs-input' })
+    return r
   })
 
   on('turn.start', async ($, e, next) => {
@@ -915,21 +910,6 @@ export const register: Register = on => {
     return yield* next(e)
   })
 
-  on('classic.CwdChanged', async ($, e, next) => {
-    await publish($, { cwd: e.new_cwd, ...(await readGit($, e.new_cwd)) })
-    return next(e)
-  })
-
-  on('classic.Notification', async ($, e, next) => {
-    if (own.status === 'running') await publish($, { status: 'needs-input' })
-    return next(e)
-  })
-
-  on('classic.PermissionRequest', async ($, e, next) => {
-    if (own.status === 'running') await publish($, { status: 'needs-input' })
-    return next(e)
-  })
-
   on('session.measure', async ($, e, next) => {
     await publish($, {
       contextPercent: e.context.percent ?? null,
@@ -944,7 +924,8 @@ export const register: Register = on => {
     const r = await next(e)
     if (e.agentId) return r
     await publish($, { status: 'idle', asked: !e.isAborted && endsWithQuestion(e.answer), tool: '', recap: [] })
-    await publish($, await readGit($, own.cwd))
+    const cwd = await $.session.cwd()
+    await publish($, { cwd, ...(await readGit($, cwd)) })
     if (isInteractive && !e.isAborted && isWorthRecap(turnTools, e.answer)) {
       const seq = ++recapSeq
       void makeRecap($, recapPrompt(lastRequest, e.answer, turnTools, [...turnFiles]), seq).catch(err => {
@@ -956,7 +937,15 @@ export const register: Register = on => {
 
   on('session.end', async ($, e, next) => {
     if (e.sessionId === own.sessionId) await publish($, { status: 'ended', tool: '' }, true)
-    return next(e)
+    const r = await next(e)
+    if (e.reason !== 'clear' && e.reason !== 'resume') return r
+    const sessionId = await $.session.id()
+    if (sessionId === e.sessionId) return r
+    titleSeq++
+    recapSeq++
+    const title = e.reason === 'clear' ? TITLE_READY : ((await savedCard($, sessionId))?.title ?? '')
+    await publish($, { sessionId, status: 'idle', asked: false, tool: '', title, recap: [] })
+    return r
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
